@@ -1,0 +1,13 @@
+/*
+ * Copyright (c) 2024 Afiq Zudin Hadi
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ */
+
+/ {
+    behaviors {
+        /omit-if-no-ref/ steno: steno_engine {
+            compatible = "zmk,behavior-steno-engine";
+            #binding-cells = <1>;
+        };
+    };
+};

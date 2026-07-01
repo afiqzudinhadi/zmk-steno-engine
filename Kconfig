@@ -1,0 +1,85 @@
+# Copyright (c) 2024 Afiq Zudin Hadi
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
+menuconfig STENO_ENGINE
+	bool "Steno Engine"
+	default n
+	help
+	  Enable the stenography engine for ZMK.
+
+if STENO_ENGINE
+
+choice STENO_DICT
+	prompt "Steno dictionary"
+	default STENO_DICT_PLOVER
+
+config STENO_DICT_PLOVER
+	bool "Plover main dictionary (MPHF compressed)"
+	help
+	  Use Plover main.json via MPHF compression (~44K entries in 453KB).
+
+config STENO_DICT_LAPWING
+	bool "Lapwing dictionary (MPHF compressed)"
+
+config STENO_DICT_TEST
+	bool "Test dictionary (46 entries, simple format)"
+	help
+	  Small built-in test dictionary for development.
+
+endchoice
+
+config STENO_DICT_MPHF
+	bool
+	default y if STENO_DICT_PLOVER || STENO_DICT_LAPWING
+	select ZLIB
+	help
+	  Use MPHF (minimal perfect hash) dictionary format.
+	  Selects ZLIB for block-compressed string table decompression.
+	  Auto-selected for Plover/Lapwing dicts.
+
+config STENO_CUSTOM_KEYMAP
+	bool "Custom steno keymap"
+	default n
+
+choice STENO_UNICODE_MODE
+	prompt "Unicode output mode"
+	default STENO_UNICODE_MODE_NONE
+
+config STENO_UNICODE_MODE_NONE
+	bool "None (HID only)"
+
+config STENO_UNICODE_MODE_LINUX
+	bool "Linux (IBus)"
+
+config STENO_UNICODE_MODE_MACOS
+	bool "macOS"
+
+config STENO_UNICODE_MODE_WINC
+	bool "Windows (WinCompose)"
+
+endchoice
+
+config STENO_HISTORY_SIZE
+	int "Stroke history size (undo depth)"
+	default 100
+	range 10 500
+
+config STENO_KEY_DELAY_MS
+	int "Key output delay (ms)"
+	default 0
+	range 0 50
+
+config STENO_MULTI_STROKE_TIMEOUT_MS
+	int "Multi-stroke timeout (ms)"
+	default 500
+	range 100 5000
+
+config STENO_DICT_MAX_SIZE
+	int "Max dictionary binary size (bytes)"
+	default 430080
+	help
+	  Max compiled dict size. 430080 = 420KB.
+	  Leaves room for zlib decompressor + USB logging overhead.
+	  The MPHF compiler auto-trims to fit.
+
+endif # STENO_ENGINE

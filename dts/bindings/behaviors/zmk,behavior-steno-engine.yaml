@@ -1,0 +1,14 @@
+# Copyright (c) 2024 Afiq Zudin Hadi
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
+description: |
+  Steno engine behavior. Maps physical keys to steno positions,
+  detects chords on all-keys-up, and emits translated text.
+
+  Usage in keymap:
+    &steno STENO_SL    // left S key
+    &steno STENO_TL    // left T key
+
+compatible: "zmk,behavior-steno-engine"
+
+include: one_param.yaml

@@ -1,0 +1,5 @@
+# zmk-steno-engine dictionary compiler
+# stdlib only — no external dependencies required
+#
+# Python >= 3.8
+# Uses: json, struct, zlib, argparse, sys, os, collections, math

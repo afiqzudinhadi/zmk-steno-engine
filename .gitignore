@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+dicts/plover-main.json
+dicts/lapwing.json
+dicts/*.sha256
+tests/build/
