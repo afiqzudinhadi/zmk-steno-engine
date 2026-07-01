@@ -1,0 +1,8 @@
+/ {
+    behaviors {
+        /omit-if-no-ref/ steno: steno_engine {
+            compatible = "zmk,behavior-steno-engine";
+            #binding-cells = <1>;
+        };
+    };
+};

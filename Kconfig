@@ -1,0 +1,127 @@
+# Copyright (c) 2024 Afiq Zudin Hadi
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
+menuconfig STENO_ENGINE
+	bool "Steno Engine"
+	default n
+	help
+	  Enable the stenography engine for ZMK.
+
+if STENO_ENGINE
+
+# ──────────────────────────────────────────────
+# Dictionary selection
+# ──────────────────────────────────────────────
+
+choice STENO_DICT
+	prompt "Steno dictionary"
+	default STENO_DICT_PLOVER
+
+config STENO_DICT_PLOVER
+	bool "Plover main dictionary (MPHF compressed)"
+	help
+	  Use Plover main.json via MPHF compression (~44K entries in 453KB).
+
+config STENO_DICT_LAPWING
+	bool "Lapwing dictionary (MPHF compressed)"
+
+config STENO_DICT_TEST
+	bool "Test dictionary (46 entries, simple format)"
+	help
+	  Small built-in test dictionary for development.
+
+endchoice
+
+config STENO_DICT_MPHF
+	bool
+	default y if STENO_DICT_PLOVER || STENO_DICT_LAPWING
+	help
+	  Use MPHF (minimal perfect hash) dictionary format.
+	  Auto-selected for Plover/Lapwing dicts.
+
+# ──────────────────────────────────────────────
+# Unicode output mode
+# ──────────────────────────────────────────────
+
+choice STENO_UNICODE_MODE
+	prompt "Unicode output mode"
+	default STENO_UNICODE_MODE_NONE
+
+config STENO_UNICODE_MODE_NONE
+	bool "None (HID only)"
+
+config STENO_UNICODE_MODE_LINUX
+	bool "Linux (IBus)"
+
+config STENO_UNICODE_MODE_MACOS
+	bool "macOS"
+
+config STENO_UNICODE_MODE_WINC
+	bool "Windows (WinCompose)"
+
+endchoice
+
+config STENO_HISTORY_SIZE
+	int "Stroke history size (undo depth)"
+	default 100
+	range 10 500
+
+config STENO_KEY_DELAY_MS
+	int "Key output delay (ms)"
+	default 0
+	range 0 50
+
+config STENO_MULTI_STROKE_TIMEOUT_MS
+	int "Multi-stroke timeout (ms)"
+	default 500
+	range 100 5000
+
+config STENO_DICT_MAX_SIZE
+	int "Max dictionary binary size (bytes)"
+	default 473088
+	help
+	  Max compiled dict size. 473088 = 462KB (left half flash budget).
+	  The MPHF compiler auto-trims to fit.
+
+# ──────────────────────────────────────────────
+# Split keyboard dictionary storage
+# ──────────────────────────────────────────────
+
+menuconfig STENO_SPLIT_DICT
+	bool "Split dictionary storage on peripheral"
+	default n
+	help
+	  Store the steno dictionary on the peripheral half and
+	  perform lookups over BLE. This frees flash on the central
+	  side at the cost of added lookup latency.
+
+if STENO_SPLIT_DICT
+
+config STENO_SPLIT_CACHE_SIZE
+	int "LRU cache entries on central side"
+	default 64
+	range 16 512
+	help
+	  Number of recently looked-up dictionary entries cached
+	  on the central side to avoid repeated BLE round-trips.
+
+config STENO_SPLIT_PREFETCH
+	bool "Prefetch common follow-up strokes"
+	default y
+	help
+	  After a successful lookup, speculatively prefetch dictionary
+	  entries for statistically common follow-up strokes. Reduces
+	  perceived latency for multi-stroke words.
+
+config STENO_SPLIT_TIMEOUT_MS
+	int "BLE lookup timeout (ms)"
+	default 50
+	range 10 500
+	help
+	  Maximum time in milliseconds to wait for a dictionary
+	  lookup response from the peripheral over BLE before
+	  falling back to a cache miss / no-op.
+
+endif # STENO_SPLIT_DICT
+
+endif # STENO_ENGINE
