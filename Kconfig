@@ -16,7 +16,7 @@ choice STENO_DICT
 config STENO_DICT_PLOVER
 	bool "Plover main dictionary (MPHF compressed)"
 	help
-	  Use Plover main.json via MPHF compression (~44K entries in 453KB).
+	  Use Plover main.json via MPHF compression.
 
 config STENO_DICT_LAPWING
 	bool "Lapwing dictionary (MPHF compressed)"
@@ -35,7 +35,6 @@ config STENO_DICT_MPHF
 	help
 	  Use MPHF (minimal perfect hash) dictionary format.
 	  Selects ZLIB for block-compressed string table decompression.
-	  Auto-selected for Plover/Lapwing dicts.
 
 config STENO_CUSTOM_KEYMAP
 	bool "Custom steno keymap"
@@ -76,10 +75,35 @@ config STENO_MULTI_STROKE_TIMEOUT_MS
 
 config STENO_DICT_MAX_SIZE
 	int "Max dictionary binary size (bytes)"
-	default 430080
+	default 473088
 	help
-	  Max compiled dict size. 430080 = 420KB.
-	  Leaves room for zlib decompressor + USB logging overhead.
+	  Max compiled dict size. 473088 = 462KB.
 	  The MPHF compiler auto-trims to fit.
+
+menuconfig STENO_SPLIT_DICT
+	bool "Split dictionary storage on peripheral"
+	default n
+	help
+	  Store the steno dictionary on the peripheral half and
+	  perform lookups over BLE. This frees flash on the central
+	  side at the cost of added lookup latency.
+
+if STENO_SPLIT_DICT
+
+config STENO_SPLIT_CACHE_SIZE
+	int "LRU cache entries on central side"
+	default 64
+	range 16 512
+
+config STENO_SPLIT_PREFETCH
+	bool "Prefetch common follow-up strokes"
+	default y
+
+config STENO_SPLIT_TIMEOUT_MS
+	int "BLE lookup timeout (ms)"
+	default 50
+	range 10 500
+
+endif # STENO_SPLIT_DICT
 
 endif # STENO_ENGINE

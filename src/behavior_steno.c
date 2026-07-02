@@ -16,7 +16,9 @@
 #include "undo.h"
 #include "formatter.h"
 
-#if IS_ENABLED(CONFIG_STENO_DICT_MPHF)
+#if IS_ENABLED(CONFIG_STENO_SPLIT_DICT)
+#include "split_dict.h"
+#elif IS_ENABLED(CONFIG_STENO_DICT_MPHF)
 #include "dict_mphf.h"
 #else
 #include "trie.h"
@@ -24,33 +26,17 @@
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
+#if !IS_ENABLED(CONFIG_STENO_SPLIT_DICT)
 extern const uint8_t _steno_dict_start[];
 extern const uint8_t _steno_dict_end[];
+#endif
 
-#if IS_ENABLED(CONFIG_STENO_DICT_MPHF)
+#if IS_ENABLED(CONFIG_STENO_DICT_MPHF) && !IS_ENABLED(CONFIG_STENO_SPLIT_DICT)
 static struct dict_mphf mphf_dict;
 #endif
 
 #define STENO_MAX_MULTI    8
 #define STENO_MULTI_TIMEOUT_MS CONFIG_STENO_MULTI_STROKE_TIMEOUT_MS
-
-static inline const char *dict_lookup(const uint32_t *strokes, uint8_t count)
-{
-#if IS_ENABLED(CONFIG_STENO_DICT_MPHF)
-    return dict_mphf_lookup(&mphf_dict, strokes, count);
-#else
-    return steno_trie_lookup(strokes, count);
-#endif
-}
-
-static inline bool dict_has_prefix(const uint32_t *strokes, uint8_t count)
-{
-#if IS_ENABLED(CONFIG_STENO_DICT_MPHF)
-    return (count == 1) ? dict_mphf_has_prefix(&mphf_dict, strokes[0]) : false;
-#else
-    return steno_trie_has_prefix(strokes, count);
-#endif
-}
 
 struct steno_state {
     uint32_t current_chord;
@@ -67,6 +53,30 @@ static bool dict_ready;
 
 static void flush_strokes(void);
 static void multi_timeout_handler(struct k_work *work);
+
+static const char *do_lookup(const uint32_t *strokes, uint8_t count)
+{
+#if IS_ENABLED(CONFIG_STENO_SPLIT_DICT)
+    static char split_buf[128];
+    int ret = split_dict_lookup(strokes, count, split_buf, sizeof(split_buf));
+    return (ret > 0) ? split_buf : NULL;
+#elif IS_ENABLED(CONFIG_STENO_DICT_MPHF)
+    return dict_mphf_lookup(&mphf_dict, strokes, count);
+#else
+    return steno_trie_lookup(strokes, count);
+#endif
+}
+
+static bool do_has_prefix(const uint32_t *strokes, uint8_t count)
+{
+#if IS_ENABLED(CONFIG_STENO_SPLIT_DICT)
+    return split_dict_has_prefix(strokes, count);
+#elif IS_ENABLED(CONFIG_STENO_DICT_MPHF)
+    return (count == 1) ? dict_mphf_has_prefix(&mphf_dict, strokes[0]) : false;
+#else
+    return steno_trie_has_prefix(strokes, count);
+#endif
+}
 
 static void emit_formatted(const char *translation,
                            const uint32_t *strokes, uint8_t stroke_count)
@@ -114,15 +124,11 @@ static void process_chord(void)
     state.current_chord = 0;
 
     if (!dict_ready) {
-        LOG_WRN("steno dict not ready, flushing");
         flush_strokes();
         return;
     }
 
-    const char *translation = dict_lookup(
-        state.pending_strokes, state.stroke_count);
-    LOG_INF("steno lookup %u strokes → %s", state.stroke_count,
-            translation ? translation : "(null)");
+    const char *translation = do_lookup(state.pending_strokes, state.stroke_count);
 
     if (translation) {
         emit_formatted(translation, state.pending_strokes, state.stroke_count);
@@ -130,7 +136,7 @@ static void process_chord(void)
         return;
     }
 
-    if (dict_has_prefix(state.pending_strokes, state.stroke_count)) {
+    if (do_has_prefix(state.pending_strokes, state.stroke_count)) {
         k_work_schedule(&state.multi_timeout,
                         K_MSEC(STENO_MULTI_TIMEOUT_MS));
         return;
@@ -140,8 +146,7 @@ static void process_chord(void)
         uint32_t last = state.pending_strokes[state.stroke_count - 1];
         state.stroke_count--;
 
-        const char *partial = dict_lookup(
-            state.pending_strokes, state.stroke_count);
+        const char *partial = do_lookup(state.pending_strokes, state.stroke_count);
         if (partial) {
             emit_formatted(partial, state.pending_strokes, state.stroke_count);
         }
@@ -149,7 +154,7 @@ static void process_chord(void)
         state.pending_strokes[0] = last;
         state.stroke_count = 1;
 
-        const char *rest = dict_lookup(&last, 1);
+        const char *rest = do_lookup(&last, 1);
         if (rest) {
             emit_formatted(rest, &last, 1);
             state.stroke_count = 0;
@@ -169,14 +174,10 @@ static void flush_strokes(void)
 static void multi_timeout_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
-
     if (state.stroke_count == 0) {
         return;
     }
-
-    const char *translation = dict_lookup(
-        state.pending_strokes, state.stroke_count);
-
+    const char *translation = do_lookup(state.pending_strokes, state.stroke_count);
     if (translation) {
         emit_formatted(translation, state.pending_strokes, state.stroke_count);
     }
@@ -187,15 +188,13 @@ static int on_steno_binding_pressed(struct zmk_behavior_binding *binding,
                                     struct zmk_behavior_binding_event event)
 {
     uint32_t key_index = binding->param1;
-
     if (key_index > 35) {
         return -EINVAL;
     }
-
     state.current_chord |= (1U << key_index);
     state.keys_held++;
 
-    LOG_INF("steno press key=%u chord=0x%06X held=%u",
+    LOG_DBG("Key %u pressed, chord=0x%06X held=%u",
             key_index, state.current_chord, state.keys_held);
 
     return ZMK_BEHAVIOR_OPAQUE;
@@ -207,14 +206,9 @@ static int on_steno_binding_released(struct zmk_behavior_binding *binding,
     if (state.keys_held > 0) {
         state.keys_held--;
     }
-
-    LOG_INF("steno release held=%u chord=0x%06X", state.keys_held, state.current_chord);
-
     if (state.keys_held == 0 && state.current_chord != 0) {
-        LOG_INF("steno all-up → process chord 0x%06X", state.current_chord);
         process_chord();
     }
-
     return ZMK_BEHAVIOR_OPAQUE;
 }
 
@@ -230,6 +224,10 @@ static int behavior_steno_init(const struct device *dev)
     steno_undo_init(&undo_history);
     k_work_init_delayable(&state.multi_timeout, multi_timeout_handler);
 
+#if IS_ENABLED(CONFIG_STENO_SPLIT_DICT)
+    split_dict_init();
+    dict_ready = true;
+#else
     size_t dict_size = _steno_dict_end - _steno_dict_start;
     if (dict_size > 4) {
         int ret;
@@ -247,6 +245,7 @@ static int behavior_steno_init(const struct device *dev)
     } else {
         LOG_WRN("No steno dict embedded");
     }
+#endif
 
     LOG_INF("Steno engine initialized");
     return 0;
