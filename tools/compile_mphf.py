@@ -270,8 +270,24 @@ def compile_mphf(entries, max_size=None, block_size=4096):
     trans_to_id = {t: i for i, t in enumerate(unique_translations)}
     unique_count = len(unique_translations)
 
-    entry_count = len(keys_and_bytes)
-    bucket_count = max(entry_count, 16)
+    # String table (block-compressed)
+    string_data_raw = b''
+    string_offsets = []
+    for t in unique_translations:
+        string_offsets.append(len(string_data_raw))
+        string_data_raw += t.encode('utf-8') + b'\x00'
+
+    compressed_blocks = []
+    for i in range(0, len(string_data_raw), block_size):
+        block = string_data_raw[i:i + block_size]
+        compressed_blocks.append(zlib.compress(block, 9))
+
+    # Prefix table
+    prefix_strokes = set()
+    for kb, trans, stroke_str, strokes in keys_and_bytes:
+        if len(strokes) > 1:
+            prefix_strokes.add(strokes[0])
+    prefix_list = sorted(prefix_strokes)
 
     print(f"  Building CHD MPHF: {entry_count} entries...",
           file=sys.stderr)
