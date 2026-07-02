@@ -11,7 +11,6 @@
 #ifndef SPLIT_DICT_H
 #define SPLIT_DICT_H
 
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <zephyr/bluetooth/uuid.h>
@@ -26,72 +25,53 @@
     BT_UUID_DECLARE_128(BT_UUID_128_ENCODE( \
         0x7374656e, 0x6f00, 0x4000, 0x8000, 0x000000000001))
 
-#define STENO_UUID_DICT_QUERY \
+#define STENO_UUID_DICT_REQ \
     BT_UUID_DECLARE_128(BT_UUID_128_ENCODE( \
         0x7374656e, 0x6f00, 0x4000, 0x8000, 0x000000000002))
 
-#define STENO_UUID_DICT_PREFIX \
-    BT_UUID_DECLARE_128(BT_UUID_128_ENCODE( \
-        0x7374656e, 0x6f00, 0x4000, 0x8000, 0x000000000003))
-
-#define STENO_UUID_DICT_BATCH \
-    BT_UUID_DECLARE_128(BT_UUID_128_ENCODE( \
-        0x7374656e, 0x6f00, 0x4000, 0x8000, 0x000000000004))
-
-/* Message types */
+/* BLE protocol v4 message types (FORMAT_V4.md section 7) */
 enum steno_msg_type {
-    STENO_MSG_QUERY   = 0x01,
-    STENO_MSG_PREFIX  = 0x02,
-    STENO_MSG_BATCH   = 0x03,
-    STENO_MSG_RESPONSE = 0x80,
+    STENO_MSG_GET_STRING = 0x10,
+    STENO_MSG_RESOLVE    = 0x11,
+    STENO_MSG_RESPONSE   = 0x80,
 };
 
-/* Status codes */
+/* Response status codes */
 enum steno_status {
-    STENO_STATUS_FOUND       = 0,
-    STENO_STATUS_NOT_FOUND   = 1,
-    STENO_STATUS_PREFIX_ONLY = 2,
-    STENO_STATUS_ERROR       = 3,
+    STENO_STATUS_OK        = 0,
+    STENO_STATUS_NOT_FOUND = 1,
+    STENO_STATUS_ERROR     = 2,
 };
 
-/* Packet structures */
-struct steno_query_pkt {
-    uint8_t msg_type;
+/* Format v4 guarantees every translation <= 255 bytes */
+#define SPLIT_DICT_MAX_TEXT 255
+
+/* Packet structures; all multi-byte fields little-endian on the wire */
+struct steno_get_string_pkt {
+    uint8_t msg_type;         /* STENO_MSG_GET_STRING */
     uint8_t seq;
-    uint8_t stroke_count;
-    uint8_t strokes[];        /* 3 bytes per stroke (24-bit packed) */
-} __packed;
+    uint32_t string_id;       /* LE */
+} __attribute__((packed));
+
+struct steno_resolve_pkt {
+    uint8_t msg_type;         /* STENO_MSG_RESOLVE */
+    uint8_t seq;
+    uint32_t slot;            /* LE */
+    uint8_t dict;             /* 0 = plover, 1 = lapwing */
+} __attribute__((packed));
 
 struct steno_response_pkt {
-    uint8_t msg_type;
+    uint8_t msg_type;         /* STENO_MSG_RESPONSE */
     uint8_t seq;
-    uint8_t status;
-    uint16_t data_len;
-    uint8_t data[];           /* translation string (UTF-8, not null-terminated) */
-} __packed;
+    uint8_t status;           /* enum steno_status */
+    uint16_t len;             /* LE, byte length of text[] */
+    char text[];              /* translation (UTF-8, not null-terminated) */
+} __attribute__((packed));
 
-struct steno_batch_query_pkt {
-    uint8_t msg_type;
-    uint8_t seq;
-    uint8_t query_count;
-    uint8_t queries[];        /* packed steno_query_pkt entries (without msg_type/seq) */
-} __packed;
-
-/* Batch result entry */
-struct steno_batch_result {
-    uint8_t status;
-    char translation[128];
-    uint16_t translation_len;
-    bool has_prefix;
-};
-
-/* API */
+/* Central-side API */
 int split_dict_init(void);
-int split_dict_lookup(const uint32_t *strokes, uint8_t count,
-                      char *result, size_t result_size);
-bool split_dict_has_prefix(const uint32_t *strokes, uint8_t count);
-int split_dict_batch_lookup(const uint32_t **stroke_seqs, const uint8_t *counts,
-                            uint8_t num_queries, struct steno_batch_result *results);
+int split_dict_get_string(uint32_t string_id, char *out, size_t out_size);
+int split_dict_resolve(uint32_t slot, uint8_t dict, char *out, size_t out_size);
 
 /* GATT service registration */
 int split_dict_gatt_register(void);

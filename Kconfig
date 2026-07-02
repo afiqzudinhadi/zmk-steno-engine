@@ -11,29 +11,43 @@ if STENO_ENGINE
 
 choice STENO_DICT
 	prompt "Steno dictionary"
-	default STENO_DICT_PLOVER
+	default STENO_DICT_BOTH
+
+config STENO_DICT_BOTH
+	bool "Plover + Lapwing"
+	help
+	  Compile both full dictionaries into the v4 union format.
+	  The active dictionary is selected at runtime.
 
 config STENO_DICT_PLOVER
-	bool "Plover main dictionary (MPHF compressed)"
+	bool "Plover main dictionary"
 	help
-	  Use Plover main.json via MPHF compression.
+	  Compile only the Plover main dictionary.
 
 config STENO_DICT_LAPWING
-	bool "Lapwing dictionary (MPHF compressed)"
-
-config STENO_DICT_TEST
-	bool "Test dictionary (46 entries, simple format)"
+	bool "Lapwing dictionary"
 	help
-	  Small built-in test dictionary for development.
+	  Compile only the Lapwing dictionary.
 
 endchoice
 
-config STENO_DICT_MPHF
-	bool
-	default y if STENO_DICT_PLOVER || STENO_DICT_LAPWING
+config STENO_DICT_V4
+	bool "v4 union split-section dictionary format"
+	default y
 	select ZLIB
 	help
-	  Use MPHF (minimal perfect hash) dictionary format.
+	  Compile the dictionary into the v4 union split-section format
+	  (docs/FORMAT_V4.md): two half blobs, left (central) holds the
+	  lookup structures, right (peripheral) holds the string table.
+	  Requires STENO_SPLIT_DICT. Disable to fall back to the legacy
+	  single-dictionary MPHF format.
+
+config STENO_DICT_MPHF
+	bool
+	default y if !STENO_DICT_V4
+	select ZLIB
+	help
+	  Legacy MPHF (minimal perfect hash) dictionary format.
 	  Selects ZLIB for block-compressed string table decompression.
 
 config STENO_CUSTOM_KEYMAP
@@ -75,39 +89,43 @@ config STENO_MULTI_STROKE_TIMEOUT_MS
 
 config STENO_DICT_MAX_SIZE
 	int "Max dictionary binary size (bytes)"
+	depends on !STENO_DICT_V4
 	default 473088
 	help
-	  Max compiled dict size. 473088 = 462KB.
-	  Build fails if dict exceeds this — no trimming.
+	  Max compiled dict size for legacy MPHF single-blob builds.
+	  473088 = 462KB. Build FAILS if the dict exceeds this —
+	  entries are never trimmed.
 
 menuconfig STENO_SPLIT_DICT
 	bool "Split dictionary across both halves"
 	default n
-	select STENO_DICT_MPHF
 	help
-	  Partition the steno dictionary across both keyboard halves.
-	  Left (central) gets highest-importance entries for zero-latency
-	  local lookup. Right (peripheral) gets remaining entries, queried
-	  over BLE on local miss. Both halves have their own MPHF dict.
+	  Store the steno dictionary across both keyboard halves.
+	  v4 format: left (central) holds the lookup structures
+	  (displacements, membership, fingerprints, conflicts, part of
+	  the value index); right (peripheral) holds the string table,
+	  queried over BLE. Legacy MPHF format: entries partitioned by
+	  importance, right half queried over BLE on local miss.
+	  Build FAILS if either half exceeds its budget — entries are
+	  never trimmed.
 
 if STENO_SPLIT_DICT
 
 config STENO_DICT_LEFT_MAX_SIZE
 	int "Left half dict budget (bytes)"
-	default 153600
+	default 440320
 	help
-	  Flash budget for left (central) partition. Default 150KB.
-	  Central has more code overhead (behavior, formatter, output,
-	  undo, BLE client) so gets a smaller dict partition.
-	  Highest-importance entries fill this first.
+	  Flash budget for the left (central) half blob. Default
+	  440320 = 430KB. Build FAILS if the compiled blob exceeds
+	  this — entries are never trimmed.
 
 config STENO_DICT_RIGHT_MAX_SIZE
 	int "Right half dict budget (bytes)"
-	default 512000
+	default 527360
 	help
-	  Flash budget for right (peripheral) partition. Default 500KB.
-	  Peripheral has less code overhead so gets the bulk of the dict.
-	  Remaining entries after left partition is filled.
+	  Flash budget for the right (peripheral) half blob. Default
+	  527360 = 515KB. Build FAILS if the compiled blob exceeds
+	  this — entries are never trimmed.
 
 config STENO_SPLIT_CACHE_SIZE
 	int "LRU cache entries on central side"

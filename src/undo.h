@@ -38,6 +38,11 @@ struct stroke_history_entry *steno_undo_pop(struct stroke_history *hist);
 /* Peek at most recent entry without removing. Returns NULL if empty. */
 const struct stroke_history_entry *steno_undo_peek(const struct stroke_history *hist);
 
+/* Peek `back` entries behind the most recent (0 = most recent).
+ * Returns NULL if out of range. */
+const struct stroke_history_entry *steno_undo_peek_at(const struct stroke_history *hist,
+                                                      uint16_t back);
+
 /* Get current count */
 uint16_t steno_undo_count(const struct stroke_history *hist);
 

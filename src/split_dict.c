@@ -8,214 +8,150 @@
  * https://polyformproject.org/licenses/noncommercial/1.0.0
  */
 
+#include <errno.h>
 #include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/uuid.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/logging/log.h>
 
 #include "split_dict.h"
 #include "split_cache.h"
-#include "dict_mphf.h"
 
 LOG_MODULE_REGISTER(split_dict, CONFIG_STENO_SPLIT_LOG_LEVEL);
+
+/* Peripheral-side v4 dict resolvers, implemented in dict_v4.c */
+extern int dict_v4_string_by_id(uint32_t string_id, char *out, size_t out_size);
+extern int dict_v4_resolve_slot(uint32_t slot, uint8_t dict, char *out, size_t out_size);
 
 /* Semaphore for blocking on BLE response */
 static K_SEM_DEFINE(response_sem, 0, 1);
 
-/* Current pending response state */
+/* Current pending response state (central side) */
 static uint8_t pending_seq;
-static uint8_t response_buf[256];
-static uint16_t response_len;
+static uint8_t rx_buf[sizeof(struct steno_response_pkt) + SPLIT_DICT_MAX_TEXT];
+static uint16_t rx_len;
 static uint8_t seq_counter;
+
+/* Notify buffer (peripheral side) */
+static uint8_t notify_buf[sizeof(struct steno_response_pkt) + SPLIT_DICT_MAX_TEXT];
 
 /* Cache instance */
 static struct split_cache dict_cache;
 
-/* Local MPHF dict for peripheral-side GATT lookups */
-extern const uint8_t _steno_dict_start[];
-extern const uint8_t _steno_dict_end[];
-static struct dict_mphf peripheral_mphf;
-static bool peripheral_dict_ready;
+/* --- Cache key synthesis ---
+ *
+ * The LRU cache keys on stroke sequences (uint32_t[]). Protocol v4 requests
+ * are keyed instead by string_id or (slot, dict); synthesize a two-word
+ * pseudo-stroke key with a tag word that can never collide with a real
+ * 23-bit stroke bitmask. */
 
-/* --- Helpers --- */
+#define CACHE_TAG_GET_STRING 0x80000010u
+#define CACHE_TAG_RESOLVE    0x80000011u
 
-static void encode_strokes(const uint32_t *strokes, uint8_t count, uint8_t *out)
+static void make_string_key(uint32_t string_id, uint32_t key[2])
 {
-    for (uint8_t i = 0; i < count; i++) {
-        out[i * 3 + 0] = (strokes[i] >> 16) & 0xFF;
-        out[i * 3 + 1] = (strokes[i] >> 8) & 0xFF;
-        out[i * 3 + 2] = strokes[i] & 0xFF;
-    }
+    key[0] = CACHE_TAG_GET_STRING;
+    key[1] = string_id;
 }
 
-static void decode_strokes(const uint8_t *in, uint8_t count, uint32_t *strokes)
+static void make_resolve_key(uint32_t slot, uint8_t dict, uint32_t key[2])
 {
-    for (uint8_t i = 0; i < count; i++) {
-        strokes[i] = ((uint32_t)in[i * 3 + 0] << 16) |
-                     ((uint32_t)in[i * 3 + 1] << 8) |
-                     (uint32_t)in[i * 3 + 2];
-    }
+    key[0] = CACHE_TAG_RESOLVE | ((uint32_t)dict << 8);
+    key[1] = slot;
 }
 
 /* --- GATT Write Callbacks (peripheral side handlers) --- */
 
-static ssize_t dict_query_write_cb(struct bt_conn *conn,
-                                   const struct bt_gatt_attr *attr,
-                                   const void *buf, uint16_t len,
-                                   uint16_t offset, uint8_t flags)
+static void send_response(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                          uint8_t seq, int ret, const char *text)
 {
-    const struct steno_query_pkt *pkt = buf;
+    struct steno_response_pkt *resp = (struct steno_response_pkt *)notify_buf;
+    uint16_t tlen = 0;
 
-    if (len < sizeof(struct steno_query_pkt)) {
-        LOG_WRN("Query pkt too short: %u", len);
-        return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
-    }
-
-    uint8_t stroke_count = pkt->stroke_count;
-    uint16_t expected = sizeof(struct steno_query_pkt) + stroke_count * 3;
-
-    if (len < expected) {
-        LOG_WRN("Query pkt truncated: got %u, need %u", len, expected);
-        return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
-    }
-
-    uint32_t strokes[8];
-    if (stroke_count > 8) {
-        stroke_count = 8;
-    }
-    decode_strokes(pkt->strokes, stroke_count, strokes);
-
-    /* Build response */
-    struct steno_response_pkt *resp = (struct steno_response_pkt *)response_buf;
     resp->msg_type = STENO_MSG_RESPONSE;
-    resp->seq = pkt->seq;
+    resp->seq = seq;
 
-    const char *translation = NULL;
-    if (peripheral_dict_ready) {
-        translation = dict_mphf_lookup(&peripheral_mphf, strokes, stroke_count);
-    }
-
-    if (translation) {
-        uint16_t tlen = (uint16_t)strlen(translation);
-        resp->status = STENO_STATUS_FOUND;
-        resp->data_len = tlen;
-        memcpy(resp->data, translation, tlen);
-        response_len = sizeof(struct steno_response_pkt) + tlen;
-    } else {
+    if (ret >= 0) {
+        resp->status = STENO_STATUS_OK;
+        tlen = (uint16_t)strlen(text);
+        memcpy(resp->text, text, tlen);
+    } else if (ret == -ENOENT) {
         resp->status = STENO_STATUS_NOT_FOUND;
-        resp->data_len = 0;
-        response_len = sizeof(struct steno_response_pkt);
+    } else {
+        resp->status = STENO_STATUS_ERROR;
     }
 
-    /* Notify central with response */
-    bt_gatt_notify(conn, attr, response_buf, response_len);
+    resp->len = sys_cpu_to_le16(tlen);
+
+    bt_gatt_notify(conn, attr, notify_buf, sizeof(*resp) + tlen);
+}
+
+static ssize_t handle_get_string(struct bt_conn *conn,
+                                 const struct bt_gatt_attr *attr,
+                                 const void *buf, uint16_t len)
+{
+    const struct steno_get_string_pkt *pkt = buf;
+    char text[SPLIT_DICT_MAX_TEXT + 1];
+
+    if (len < sizeof(*pkt)) {
+        LOG_WRN("GET_STRING pkt too short: %u", len);
+        return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+    }
+
+    uint32_t string_id = sys_le32_to_cpu(pkt->string_id);
+
+    int ret = dict_v4_string_by_id(string_id, text, sizeof(text));
+
+    send_response(conn, attr, pkt->seq, ret, text);
 
     return len;
 }
 
-static ssize_t dict_prefix_write_cb(struct bt_conn *conn,
-                                    const struct bt_gatt_attr *attr,
-                                    const void *buf, uint16_t len,
-                                    uint16_t offset, uint8_t flags)
+static ssize_t handle_resolve(struct bt_conn *conn,
+                              const struct bt_gatt_attr *attr,
+                              const void *buf, uint16_t len)
 {
-    const struct steno_query_pkt *pkt = buf;
+    const struct steno_resolve_pkt *pkt = buf;
+    char text[SPLIT_DICT_MAX_TEXT + 1];
 
-    if (len < sizeof(struct steno_query_pkt)) {
+    if (len < sizeof(*pkt)) {
+        LOG_WRN("RESOLVE pkt too short: %u", len);
         return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
     }
 
-    uint8_t stroke_count = pkt->stroke_count;
-    if (stroke_count > 8) {
-        stroke_count = 8;
-    }
+    uint32_t slot = sys_le32_to_cpu(pkt->slot);
 
-    uint32_t strokes[8];
-    decode_strokes(pkt->strokes, stroke_count, strokes);
+    int ret = dict_v4_resolve_slot(slot, pkt->dict, text, sizeof(text));
 
-    struct steno_response_pkt *resp = (struct steno_response_pkt *)response_buf;
-    resp->msg_type = STENO_MSG_RESPONSE;
-    resp->seq = pkt->seq;
-    resp->data_len = 0;
-
-    if (peripheral_dict_ready &&
-        stroke_count == 1 &&
-        dict_mphf_has_prefix(&peripheral_mphf, strokes[0])) {
-        resp->status = STENO_STATUS_PREFIX_ONLY;
-    } else {
-        resp->status = STENO_STATUS_NOT_FOUND;
-    }
-
-    response_len = sizeof(struct steno_response_pkt);
-    bt_gatt_notify(conn, attr, response_buf, response_len);
+    send_response(conn, attr, pkt->seq, ret, text);
 
     return len;
 }
 
-static ssize_t dict_batch_write_cb(struct bt_conn *conn,
-                                   const struct bt_gatt_attr *attr,
-                                   const void *buf, uint16_t len,
-                                   uint16_t offset, uint8_t flags)
+static ssize_t dict_req_write_cb(struct bt_conn *conn,
+                                 const struct bt_gatt_attr *attr,
+                                 const void *buf, uint16_t len,
+                                 uint16_t offset, uint8_t flags)
 {
-    const struct steno_batch_query_pkt *pkt = buf;
+    const uint8_t *bytes = buf;
 
-    if (len < sizeof(struct steno_batch_query_pkt)) {
+    if (len < 1) {
         return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
     }
 
-    LOG_DBG("Batch query: %u queries", pkt->query_count);
-
-    /* Process each sub-query packed in queries[] */
-    uint16_t pos = 0;
-    const uint8_t *data = pkt->queries;
-    uint16_t data_len = len - sizeof(struct steno_batch_query_pkt);
-
-    for (uint8_t q = 0; q < pkt->query_count && pos < data_len; q++) {
-        if (pos >= data_len) {
-            break;
-        }
-        uint8_t stroke_count = data[pos];
-        pos++;
-
-        if (stroke_count > 8) {
-            stroke_count = 8;
-        }
-        if (pos + stroke_count * 3 > data_len) {
-            break;
-        }
-
-        uint32_t strokes[8];
-        decode_strokes(&data[pos], stroke_count, strokes);
-        pos += stroke_count * 3;
-
-        /* Lookup and send individual response per query */
-        struct steno_response_pkt *resp = (struct steno_response_pkt *)response_buf;
-        resp->msg_type = STENO_MSG_RESPONSE;
-        resp->seq = pkt->seq;
-
-        const char *translation = NULL;
-        if (peripheral_dict_ready) {
-            translation = dict_mphf_lookup(&peripheral_mphf, strokes, stroke_count);
-        }
-
-        if (translation) {
-            uint16_t tlen = (uint16_t)strlen(translation);
-            resp->status = STENO_STATUS_FOUND;
-            resp->data_len = tlen;
-            memcpy(resp->data, translation, tlen);
-            response_len = sizeof(struct steno_response_pkt) + tlen;
-        } else {
-            resp->status = STENO_STATUS_NOT_FOUND;
-            resp->data_len = 0;
-            response_len = sizeof(struct steno_response_pkt);
-        }
-
-        bt_gatt_notify(conn, attr, response_buf, response_len);
+    switch (bytes[0]) {
+    case STENO_MSG_GET_STRING:
+        return handle_get_string(conn, attr, buf, len);
+    case STENO_MSG_RESOLVE:
+        return handle_resolve(conn, attr, buf, len);
+    default:
+        LOG_WRN("Unknown msg type: 0x%02x", bytes[0]);
+        return BT_GATT_ERR(BT_ATT_ERR_NOT_SUPPORTED);
     }
-
-    return len;
 }
 
 /* --- Notification callback (central side) --- */
@@ -236,9 +172,12 @@ static uint8_t notify_cb(struct bt_conn *conn,
         return BT_GATT_ITER_CONTINUE;
     }
 
-    if (resp->seq == pending_seq) {
-        memcpy(response_buf, data, length);
-        response_len = length;
+    if (resp->msg_type == STENO_MSG_RESPONSE && resp->seq == pending_seq) {
+        if (length > sizeof(rx_buf)) {
+            length = sizeof(rx_buf);
+        }
+        memcpy(rx_buf, data, length);
+        rx_len = length;
         k_sem_give(&response_sem);
     }
 
@@ -250,25 +189,11 @@ static uint8_t notify_cb(struct bt_conn *conn,
 BT_GATT_SERVICE_DEFINE(steno_dict_svc,
     BT_GATT_PRIMARY_SERVICE(STENO_UUID_SERVICE),
 
-    /* Dict Query characteristic: write + notify */
-    BT_GATT_CHARACTERISTIC(STENO_UUID_DICT_QUERY,
+    /* Dict request characteristic: write + notify */
+    BT_GATT_CHARACTERISTIC(STENO_UUID_DICT_REQ,
                            BT_GATT_CHRC_WRITE | BT_GATT_CHRC_NOTIFY,
                            BT_GATT_PERM_WRITE,
-                           NULL, dict_query_write_cb, NULL),
-    BT_GATT_CCC(NULL, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
-
-    /* Dict Prefix characteristic: write + notify */
-    BT_GATT_CHARACTERISTIC(STENO_UUID_DICT_PREFIX,
-                           BT_GATT_CHRC_WRITE | BT_GATT_CHRC_NOTIFY,
-                           BT_GATT_PERM_WRITE,
-                           NULL, dict_prefix_write_cb, NULL),
-    BT_GATT_CCC(NULL, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
-
-    /* Dict Batch characteristic: write + notify */
-    BT_GATT_CHARACTERISTIC(STENO_UUID_DICT_BATCH,
-                           BT_GATT_CHRC_WRITE | BT_GATT_CHRC_NOTIFY,
-                           BT_GATT_PERM_WRITE,
-                           NULL, dict_batch_write_cb, NULL),
+                           NULL, dict_req_write_cb, NULL),
     BT_GATT_CCC(NULL, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 );
 
@@ -278,183 +203,137 @@ BT_GATT_SERVICE_DEFINE(steno_dict_svc,
 static struct bt_conn *split_conn;
 static struct bt_gatt_subscribe_params subscribe_params;
 
-int split_dict_lookup(const uint32_t *strokes, uint8_t count,
-                      char *result, size_t result_size)
+/* Send one request packet, block for its RESPONSE, copy text into out.
+ * Returns text length on success, -ENOENT on NOT_FOUND, negative errno
+ * otherwise. out must hold SPLIT_DICT_MAX_TEXT + 1 bytes. */
+static int split_request(const void *pkt, uint16_t pkt_len, uint8_t seq, char *out)
 {
-    if (count == 0 || count > 8) {
-        return -EINVAL;
-    }
-
-    /* Check cache first */
-    bool has_prefix;
-    if (split_cache_lookup(&dict_cache, strokes, count, result, result_size, &has_prefix)) {
-        LOG_DBG("Cache hit for %u strokes", count);
-        return strlen(result);
-    }
+    int err;
 
     if (!split_conn) {
         LOG_ERR("No split connection");
         return -ENOTCONN;
     }
 
-    /* Build query packet */
-    uint8_t pkt_buf[sizeof(struct steno_query_pkt) + 8 * 3];
-    struct steno_query_pkt *pkt = (struct steno_query_pkt *)pkt_buf;
-
-    pkt->msg_type = STENO_MSG_QUERY;
-    pkt->seq = seq_counter++;
-    pkt->stroke_count = count;
-    encode_strokes(strokes, count, pkt->strokes);
-
-    pending_seq = pkt->seq;
+    pending_seq = seq;
     k_sem_reset(&response_sem);
 
-    uint16_t pkt_len = sizeof(struct steno_query_pkt) + count * 3;
-
-    /* Send via GATT write */
-    int err = bt_gatt_write_without_response(split_conn, 0, pkt_buf, pkt_len, false);
+    err = bt_gatt_write_without_response(split_conn, 0, pkt, pkt_len, false);
     if (err) {
         LOG_ERR("GATT write failed: %d", err);
         return err;
     }
 
-    /* Wait for response */
     err = k_sem_take(&response_sem, K_MSEC(CONFIG_STENO_SPLIT_TIMEOUT_MS));
     if (err) {
         LOG_WRN("Response timeout");
         return -ETIMEDOUT;
     }
 
-    /* Decode response */
-    const struct steno_response_pkt *resp = (const struct steno_response_pkt *)response_buf;
+    const struct steno_response_pkt *resp = (const struct steno_response_pkt *)rx_buf;
 
-    if (resp->status == STENO_STATUS_FOUND) {
-        uint16_t copy_len = resp->data_len;
-        if (copy_len >= result_size) {
-            copy_len = result_size - 1;
-        }
-        memcpy(result, resp->data, copy_len);
-        result[copy_len] = '\0';
-
-        /* Cache the result */
-        split_cache_insert(&dict_cache, strokes, count, result, false);
-
-        return copy_len;
+    if (resp->status == STENO_STATUS_NOT_FOUND) {
+        return -ENOENT;
+    }
+    if (resp->status != STENO_STATUS_OK) {
+        return -EIO;
     }
 
-    return -ENOENT;
+    uint16_t tlen = sys_le16_to_cpu(resp->len);
+    uint16_t avail = rx_len - sizeof(struct steno_response_pkt);
+
+    if (tlen > avail) {
+        LOG_WRN("Response truncated: len %u, got %u", tlen, avail);
+        return -EIO;
+    }
+
+    memcpy(out, resp->text, tlen);
+    out[tlen] = '\0';
+
+    return tlen;
 }
 
-bool split_dict_has_prefix(const uint32_t *strokes, uint8_t count)
+/* Copy full text into caller buffer, truncating if needed */
+static int copy_out(const char *text, uint16_t tlen, char *out, size_t out_size)
 {
-    if (count == 0 || count > 8) {
-        return false;
+    size_t copy_len = tlen;
+
+    if (copy_len >= out_size) {
+        copy_len = out_size - 1;
     }
+    memcpy(out, text, copy_len);
+    out[copy_len] = '\0';
 
-    /* Check cache */
-    bool has_prefix;
-    char dummy[1];
-    if (split_cache_lookup(&dict_cache, strokes, count, dummy, sizeof(dummy), &has_prefix)) {
-        return has_prefix;
-    }
-
-    if (!split_conn) {
-        return false;
-    }
-
-    uint8_t pkt_buf[sizeof(struct steno_query_pkt) + 8 * 3];
-    struct steno_query_pkt *pkt = (struct steno_query_pkt *)pkt_buf;
-
-    pkt->msg_type = STENO_MSG_PREFIX;
-    pkt->seq = seq_counter++;
-    pkt->stroke_count = count;
-    encode_strokes(strokes, count, pkt->strokes);
-
-    pending_seq = pkt->seq;
-    k_sem_reset(&response_sem);
-
-    uint16_t pkt_len = sizeof(struct steno_query_pkt) + count * 3;
-
-    int err = bt_gatt_write_without_response(split_conn, 0, pkt_buf, pkt_len, false);
-    if (err) {
-        return false;
-    }
-
-    err = k_sem_take(&response_sem, K_MSEC(CONFIG_STENO_SPLIT_TIMEOUT_MS));
-    if (err) {
-        return false;
-    }
-
-    const struct steno_response_pkt *resp = (const struct steno_response_pkt *)response_buf;
-    return resp->status == STENO_STATUS_PREFIX_ONLY;
+    return (int)copy_len;
 }
 
-int split_dict_batch_lookup(const uint32_t **stroke_seqs, const uint8_t *counts,
-                            uint8_t num_queries, struct steno_batch_result *results)
+int split_dict_get_string(uint32_t string_id, char *out, size_t out_size)
 {
-    if (num_queries == 0 || !split_conn) {
+    if (!out || out_size == 0) {
         return -EINVAL;
     }
 
-    /* Build batch packet */
-    uint8_t pkt_buf[256];
-    struct steno_batch_query_pkt *pkt = (struct steno_batch_query_pkt *)pkt_buf;
+    uint32_t key[2];
+    make_string_key(string_id, key);
 
-    pkt->msg_type = STENO_MSG_BATCH;
-    pkt->seq = seq_counter++;
-    pkt->query_count = num_queries;
-
-    uint16_t pos = 0;
-    for (uint8_t q = 0; q < num_queries; q++) {
-        uint8_t cnt = counts[q];
-        if (cnt > 8) {
-            cnt = 8;
-        }
-        pkt->queries[pos] = cnt;
-        pos++;
-        encode_strokes(stroke_seqs[q], cnt, &pkt->queries[pos]);
-        pos += cnt * 3;
+    if (split_cache_lookup(&dict_cache, key, 2, out, out_size, NULL)) {
+        LOG_DBG("Cache hit for string %u", string_id);
+        return strlen(out);
     }
 
-    uint16_t pkt_len = sizeof(struct steno_batch_query_pkt) + pos;
+    struct steno_get_string_pkt pkt = {
+        .msg_type = STENO_MSG_GET_STRING,
+        .seq = seq_counter++,
+        .string_id = sys_cpu_to_le32(string_id),
+    };
 
-    pending_seq = pkt->seq;
-    k_sem_reset(&response_sem);
-
-    int err = bt_gatt_write_without_response(split_conn, 0, pkt_buf, pkt_len, false);
-    if (err) {
-        return err;
+    char text[SPLIT_DICT_MAX_TEXT + 1];
+    int ret = split_request(&pkt, sizeof(pkt), pkt.seq, text);
+    if (ret < 0) {
+        return ret;
     }
 
-    /* Collect responses for each query */
-    for (uint8_t q = 0; q < num_queries; q++) {
-        err = k_sem_take(&response_sem, K_MSEC(CONFIG_STENO_SPLIT_TIMEOUT_MS));
-        if (err) {
-            results[q].status = STENO_STATUS_ERROR;
-            continue;
-        }
-
-        const struct steno_response_pkt *resp =
-            (const struct steno_response_pkt *)response_buf;
-
-        results[q].status = resp->status;
-        results[q].has_prefix = (resp->status == STENO_STATUS_PREFIX_ONLY);
-
-        if (resp->status == STENO_STATUS_FOUND && resp->data_len > 0) {
-            uint16_t copy_len = resp->data_len;
-            if (copy_len >= sizeof(results[q].translation)) {
-                copy_len = sizeof(results[q].translation) - 1;
-            }
-            memcpy(results[q].translation, resp->data, copy_len);
-            results[q].translation[copy_len] = '\0';
-            results[q].translation_len = copy_len;
-        } else {
-            results[q].translation[0] = '\0';
-            results[q].translation_len = 0;
-        }
+    /* Cache only entries that fit the cache value slot untruncated */
+    if ((size_t)ret < SPLIT_CACHE_VALUE_SIZE) {
+        split_cache_insert(&dict_cache, key, 2, text, false);
     }
 
-    return 0;
+    return copy_out(text, ret, out, out_size);
+}
+
+int split_dict_resolve(uint32_t slot, uint8_t dict, char *out, size_t out_size)
+{
+    if (!out || out_size == 0) {
+        return -EINVAL;
+    }
+
+    uint32_t key[2];
+    make_resolve_key(slot, dict, key);
+
+    if (split_cache_lookup(&dict_cache, key, 2, out, out_size, NULL)) {
+        LOG_DBG("Cache hit for slot %u dict %u", slot, dict);
+        return strlen(out);
+    }
+
+    struct steno_resolve_pkt pkt = {
+        .msg_type = STENO_MSG_RESOLVE,
+        .seq = seq_counter++,
+        .slot = sys_cpu_to_le32(slot),
+        .dict = dict,
+    };
+
+    char text[SPLIT_DICT_MAX_TEXT + 1];
+    int ret = split_request(&pkt, sizeof(pkt), pkt.seq, text);
+    if (ret < 0) {
+        return ret;
+    }
+
+    /* Cache only entries that fit the cache value slot untruncated */
+    if ((size_t)ret < SPLIT_CACHE_VALUE_SIZE) {
+        split_cache_insert(&dict_cache, key, 2, text, false);
+    }
+
+    return copy_out(text, ret, out, out_size);
 }
 
 int split_dict_init(void)
@@ -462,20 +341,10 @@ int split_dict_init(void)
     split_cache_init(&dict_cache);
     seq_counter = 0;
     split_conn = NULL;
+    subscribe_params.notify = notify_cb;
+    subscribe_params.value = BT_GATT_CCC_NOTIFY;
 
-    /* Init peripheral-side MPHF dict for GATT lookups */
-    size_t dict_size = _steno_dict_end - _steno_dict_start;
-    if (dict_size > 4) {
-        int ret = dict_mphf_init(&peripheral_mphf, _steno_dict_start, dict_size);
-        if (ret == 0) {
-            peripheral_dict_ready = true;
-            LOG_INF("Peripheral partition loaded (%u bytes)", (unsigned)dict_size);
-        } else {
-            LOG_ERR("Peripheral partition init failed: %d", ret);
-        }
-    }
-
-    LOG_INF("Split dict initialized");
+    LOG_INF("Split dict initialized (protocol v4)");
     return 0;
 }
 

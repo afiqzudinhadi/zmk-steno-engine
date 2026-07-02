@@ -58,6 +58,17 @@ const struct stroke_history_entry *steno_undo_peek(const struct stroke_history *
     return &hist->entries[idx];
 }
 
+const struct stroke_history_entry *steno_undo_peek_at(const struct stroke_history *hist,
+                                                      uint16_t back)
+{
+    if (back >= hist->count) {
+        return NULL;
+    }
+
+    uint16_t idx = (hist->head + CONFIG_STENO_HISTORY_SIZE - 1 - back) % CONFIG_STENO_HISTORY_SIZE;
+    return &hist->entries[idx];
+}
+
 uint16_t steno_undo_count(const struct stroke_history *hist)
 {
     return hist->count;
