@@ -230,10 +230,11 @@ def build_chd(keys_and_bytes, entry_count):
 
 # ─── Compilation ───
 
-def compile_mphf(entries, max_size=None):
+def compile_mphf(entries, max_size=None, block_size=4096):
     """
     entries: list of (stroke_str, translation) from JSON dict
     max_size: max output size in bytes (default: 462*1024 = 473088)
+    block_size: zlib compression block size (smaller = better ratio, more blocks)
 
     Returns: bytes (the compiled binary) or None if can't fit
     """
@@ -286,7 +287,6 @@ def compile_mphf(entries, max_size=None):
             string_offsets.append(len(string_data_raw))
             string_data_raw += t.encode('utf-8') + b'\x00'
 
-        block_size = 4096
         compressed_blocks = []
         for i in range(0, len(string_data_raw), block_size):
             block = string_data_raw[i:i + block_size]
@@ -388,7 +388,7 @@ def compile_mphf(entries, max_size=None):
     #   magic: u32, version: u16, flags: u16,
     #   entry_count: u32, bucket_count: u32, unique_count: u32,
     #   value_bits: u8, disp_bits: u8, prefix_count: u16,
-    #   reserved0: u32, reserved1: u32
+    #   block_size: u32, reserved1: u32
     header = struct.pack('<IHHIIIBBHii',
         0x4F4E5453,     # magic "STNO"
         2,              # version
@@ -399,7 +399,7 @@ def compile_mphf(entries, max_size=None):
         value_bits,     # value_bits
         disp_bits,      # disp_bits
         prefix_count,   # prefix_count
-        0,              # reserved0
+        block_size,     # block_size (was reserved0)
         0,              # reserved1
     )
     assert len(header) == 32, f"Header is {len(header)} bytes, expected 32"
@@ -475,6 +475,7 @@ def compile_mphf(entries, max_size=None):
         'disp_bits': disp_bits,
         'max_displacement': max_disp,
         'prefix_count': prefix_count,
+        'block_size': block_size,
         'disp_section_bytes': len(disp_section),
         'val_section_bytes': len(val_section),
         'fp_section_bytes': len(fp_section),
@@ -488,8 +489,8 @@ def compile_mphf(entries, max_size=None):
 
 def print_stats(stats):
     """Print size breakdown statistics."""
-    total = stats['entry_count']
     print(f"Entries: {stats['entry_count']}")
+    print(f"Block size: {stats.get('block_size', 4096)} bytes")
     print(f"MPHF displacements: {stats['disp_section_bytes']/1024:.1f} KB "
           f"({stats['bucket_count']} buckets, {stats['disp_bits']} bits each)")
     print(f"Value array: {stats['val_section_bytes']/1024:.1f} KB "
@@ -504,6 +505,32 @@ def print_stats(stats):
     print(f"Total: {stats['total_bytes']/1024:.1f} KB")
 
 
+def partition_entries(entries, left_budget, right_budget):
+    """Partition dict entries by importance into left (central) and right (peripheral).
+
+    Left gets highest-importance entries first (most common single-stroke words).
+    Right gets remaining entries. Both are trimmed to their flash budgets via
+    compile_mphf's internal trimming.
+
+    Returns (left_entries, right_entries).
+    """
+    sorted_entries = sorted(entries, key=lambda e: score_entry(e[0], e[1]))
+
+    # Rough estimate: ~15 bytes per entry average (conservative)
+    # compile_mphf will trim further if needed
+    est_bytes_per_entry = 15
+    left_max = left_budget // est_bytes_per_entry
+    right_max = right_budget // est_bytes_per_entry
+
+    # Cap to actual count
+    left_max = min(left_max, len(sorted_entries))
+
+    left_entries = sorted_entries[:left_max]
+    right_entries = sorted_entries[left_max:]
+
+    return left_entries, right_entries
+
+
 def main():
     parser = argparse.ArgumentParser(description='Compile steno dictionary to MPHF binary format')
     parser.add_argument('input', help='Input JSON dictionary (Plover format)')
@@ -516,6 +543,14 @@ def main():
                        help='Print size breakdown statistics')
     parser.add_argument('--verify', action='store_true', default=True,
                        help='Verify compiled dict (default: true)')
+    parser.add_argument('--split-part', choices=['left', 'right'],
+                       help='Build one partition of a split dict (left=central, right=peripheral)')
+    parser.add_argument('--left-size', type=int, default=430080,
+                       help='Left partition flash budget in bytes (default: 430080 = 420KB)')
+    parser.add_argument('--right-size', type=int, default=545792,
+                       help='Right partition flash budget in bytes (default: 545792 = 533KB)')
+    parser.add_argument('--block-size', type=int, default=4096,
+                       help='Zlib compression block size (default: 4096, try 2048/1024 for tighter packing)')
     args = parser.parse_args()
 
     # Load dictionary
@@ -531,7 +566,26 @@ def main():
         entries = entries_scored[:args.max_entries]
         print(f"Trimmed to {len(entries)} entries (--max-entries)", file=sys.stderr)
 
-    result = compile_mphf(entries, max_size=args.max_size)
+    # Split-partition mode
+    if args.split_part:
+        left_entries, right_entries = partition_entries(
+            entries, args.left_size, args.right_size)
+
+        if args.split_part == 'left':
+            print(f"Split partition: LEFT (central) — {len(left_entries)} entries, "
+                  f"budget {args.left_size} bytes", file=sys.stderr)
+            entries = left_entries
+            max_size = args.left_size
+        else:
+            print(f"Split partition: RIGHT (peripheral) — {len(right_entries)} entries, "
+                  f"budget {args.right_size} bytes", file=sys.stderr)
+            entries = right_entries
+            max_size = args.right_size
+    else:
+        max_size = args.max_size
+
+    result = compile_mphf(entries, max_size=max_size,
+                          block_size=args.block_size)
 
     if result is None:
         print("Compilation failed", file=sys.stderr)
@@ -544,8 +598,10 @@ def main():
 
     print(f"Wrote {len(binary)} bytes to {args.output}", file=sys.stderr)
 
-    if args.stats:
+    if args.stats or args.split_part:
         print()
+        if args.split_part:
+            print(f"=== {args.split_part.upper()} partition ===")
         print_stats(stats)
 
 

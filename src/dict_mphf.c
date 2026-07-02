@@ -188,6 +188,9 @@ int dict_mphf_init(struct dict_mphf *dict, const void *data, size_t len)
         dict->blocks_start = dict->str_data_start;
     }
 
+    /* Block size from header (0 = legacy default 4096) */
+    dict->blk_size = hdr->block_size ? hdr->block_size : DICT_MPHF_BLOCK_SIZE;
+
     /* Prefix table at end */
     uint32_t prefix_bytes = (uint32_t)hdr->prefix_count * 4;
     if (len >= prefix_bytes) {
@@ -213,8 +216,8 @@ static const char *resolve_string(const struct dict_mphf *dict, uint32_t val_id)
     }
 
     /* Block-compressed: decompress the right block */
-    uint32_t block_idx = str_offset / DICT_MPHF_BLOCK_SIZE;
-    uint32_t in_block_off = str_offset % DICT_MPHF_BLOCK_SIZE;
+    uint32_t block_idx = str_offset / dict->blk_size;
+    uint32_t in_block_off = str_offset % dict->blk_size;
 
     if (block_idx >= dict->block_count) {
         return NULL;

@@ -18,6 +18,7 @@
 
 #include "split_dict.h"
 #include "split_cache.h"
+#include "dict_mphf.h"
 
 LOG_MODULE_REGISTER(split_dict, CONFIG_STENO_SPLIT_LOG_LEVEL);
 
@@ -33,10 +34,11 @@ static uint8_t seq_counter;
 /* Cache instance */
 static struct split_cache dict_cache;
 
-/* External trie lookup (peripheral side) */
-extern int trie_lookup(const uint32_t *strokes, uint8_t count,
-                       char *result, size_t result_size);
-extern bool trie_has_prefix(const uint32_t *strokes, uint8_t count);
+/* Local MPHF dict for peripheral-side GATT lookups */
+extern const uint8_t _steno_dict_start[];
+extern const uint8_t _steno_dict_end[];
+static struct dict_mphf peripheral_mphf;
+static bool peripheral_dict_ready;
 
 /* --- Helpers --- */
 
@@ -91,14 +93,17 @@ static ssize_t dict_query_write_cb(struct bt_conn *conn,
     resp->msg_type = STENO_MSG_RESPONSE;
     resp->seq = pkt->seq;
 
-    char translation[128];
-    int ret = trie_lookup(strokes, stroke_count, translation, sizeof(translation));
+    const char *translation = NULL;
+    if (peripheral_dict_ready) {
+        translation = dict_mphf_lookup(&peripheral_mphf, strokes, stroke_count);
+    }
 
-    if (ret > 0) {
+    if (translation) {
+        uint16_t tlen = (uint16_t)strlen(translation);
         resp->status = STENO_STATUS_FOUND;
-        resp->data_len = (uint16_t)ret;
-        memcpy(resp->data, translation, ret);
-        response_len = sizeof(struct steno_response_pkt) + ret;
+        resp->data_len = tlen;
+        memcpy(resp->data, translation, tlen);
+        response_len = sizeof(struct steno_response_pkt) + tlen;
     } else {
         resp->status = STENO_STATUS_NOT_FOUND;
         resp->data_len = 0;
@@ -135,7 +140,9 @@ static ssize_t dict_prefix_write_cb(struct bt_conn *conn,
     resp->seq = pkt->seq;
     resp->data_len = 0;
 
-    if (trie_has_prefix(strokes, stroke_count)) {
+    if (peripheral_dict_ready &&
+        stroke_count == 1 &&
+        dict_mphf_has_prefix(&peripheral_mphf, strokes[0])) {
         resp->status = STENO_STATUS_PREFIX_ONLY;
     } else {
         resp->status = STENO_STATUS_NOT_FOUND;
@@ -188,14 +195,17 @@ static ssize_t dict_batch_write_cb(struct bt_conn *conn,
         resp->msg_type = STENO_MSG_RESPONSE;
         resp->seq = pkt->seq;
 
-        char translation[128];
-        int ret = trie_lookup(strokes, stroke_count, translation, sizeof(translation));
+        const char *translation = NULL;
+        if (peripheral_dict_ready) {
+            translation = dict_mphf_lookup(&peripheral_mphf, strokes, stroke_count);
+        }
 
-        if (ret > 0) {
+        if (translation) {
+            uint16_t tlen = (uint16_t)strlen(translation);
             resp->status = STENO_STATUS_FOUND;
-            resp->data_len = (uint16_t)ret;
-            memcpy(resp->data, translation, ret);
-            response_len = sizeof(struct steno_response_pkt) + ret;
+            resp->data_len = tlen;
+            memcpy(resp->data, translation, tlen);
+            response_len = sizeof(struct steno_response_pkt) + tlen;
         } else {
             resp->status = STENO_STATUS_NOT_FOUND;
             resp->data_len = 0;
@@ -452,6 +462,18 @@ int split_dict_init(void)
     split_cache_init(&dict_cache);
     seq_counter = 0;
     split_conn = NULL;
+
+    /* Init peripheral-side MPHF dict for GATT lookups */
+    size_t dict_size = _steno_dict_end - _steno_dict_start;
+    if (dict_size > 4) {
+        int ret = dict_mphf_init(&peripheral_mphf, _steno_dict_start, dict_size);
+        if (ret == 0) {
+            peripheral_dict_ready = true;
+            LOG_INF("Peripheral partition loaded (%u bytes)", (unsigned)dict_size);
+        } else {
+            LOG_ERR("Peripheral partition init failed: %d", ret);
+        }
+    }
 
     LOG_INF("Split dict initialized");
     return 0;

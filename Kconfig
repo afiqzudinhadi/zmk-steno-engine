@@ -81,14 +81,30 @@ config STENO_DICT_MAX_SIZE
 	  The MPHF compiler auto-trims to fit.
 
 menuconfig STENO_SPLIT_DICT
-	bool "Split dictionary storage on peripheral"
+	bool "Split dictionary across both halves"
 	default n
+	select STENO_DICT_MPHF
 	help
-	  Store the steno dictionary on the peripheral half and
-	  perform lookups over BLE. This frees flash on the central
-	  side at the cost of added lookup latency.
+	  Partition the steno dictionary across both keyboard halves.
+	  Left (central) gets highest-importance entries for zero-latency
+	  local lookup. Right (peripheral) gets remaining entries, queried
+	  over BLE on local miss. Both halves have their own MPHF dict.
 
 if STENO_SPLIT_DICT
+
+config STENO_DICT_LEFT_MAX_SIZE
+	int "Left half dict budget (bytes)"
+	default 430080
+	help
+	  Flash budget for left (central) partition. Default 420KB.
+	  Highest-importance entries fill this first.
+
+config STENO_DICT_RIGHT_MAX_SIZE
+	int "Right half dict budget (bytes)"
+	default 545792
+	help
+	  Flash budget for right (peripheral) partition. Default 533KB.
+	  Remaining entries after left partition is filled.
 
 config STENO_SPLIT_CACHE_SIZE
 	int "LRU cache entries on central side"
@@ -103,6 +119,10 @@ config STENO_SPLIT_TIMEOUT_MS
 	int "BLE lookup timeout (ms)"
 	default 50
 	range 10 500
+
+config STENO_SPLIT_LOG_LEVEL
+	int "Split dict log level"
+	default 3
 
 endif # STENO_SPLIT_DICT
 

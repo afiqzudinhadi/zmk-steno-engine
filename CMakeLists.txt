@@ -9,30 +9,31 @@ target_include_directories(app PRIVATE
 )
 
 # ── Split-dict mode ──────────────────────────────────
-# Central: behavior engine + BLE dict client
-# Peripheral: dict embed + lookup engine + GATT server
+# TRUE split: both halves have local MPHF partition + BLE fallback
+# Central: behavior engine + local left partition + BLE client
+# Peripheral: local right partition + GATT server
 if(CONFIG_STENO_SPLIT_DICT)
 
   if(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-    # Central side: behavior engine queries peripheral over BLE
+    # Central: behavior engine + local dict + BLE client for remote partition
     target_sources(app PRIVATE
         src/behavior_steno.c
         src/output.c
         src/formatter.c
         src/undo.c
+        src/dict_embed.S
+        src/dict_mphf.c
         src/split_dict.c
         src/split_cache.c
     )
   else()
-    # Peripheral side: dict embedded here, serves GATT queries
+    # Peripheral: local dict + GATT server for central queries
     target_sources(app PRIVATE
         src/dict_embed.S
+        src/dict_mphf.c
+        src/split_dict.c
+        src/split_cache.c
     )
-    if(CONFIG_STENO_DICT_MPHF)
-      target_sources(app PRIVATE src/dict_mphf.c)
-    else()
-      target_sources(app PRIVATE src/trie.c)
-    endif()
   endif()
 
 # ── Non-split mode ───────────────────────────────────
@@ -55,12 +56,11 @@ else()
 endif()
 
 # ── Dictionary compilation ───────────────────────────
-# Build dict binary when we embed it (non-split, or split peripheral)
+# Both halves need dict embed in split mode; non-split same as before
 set(STENO_NEED_DICT_EMBED FALSE)
 if(CONFIG_STENO_SPLIT_DICT)
-  if(NOT CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-    set(STENO_NEED_DICT_EMBED TRUE)
-  endif()
+  # Both central and peripheral need their own partition
+  set(STENO_NEED_DICT_EMBED TRUE)
 elseif(NOT CONFIG_ZMK_SPLIT OR CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
   set(STENO_NEED_DICT_EMBED TRUE)
 endif()
@@ -96,19 +96,43 @@ if(STENO_NEED_DICT_EMBED)
 
   # Compile dict binary
   if(EXISTS ${STENO_DICT_SRC})
-    if(CONFIG_STENO_DICT_MPHF)
-      # Fetch at build time if hash changed
-      if(DEFINED STENO_DICT_NAME)
-        add_custom_command(
-            OUTPUT ${STENO_DICT_SRC}.stamp
-            COMMAND ${Python3_EXECUTABLE} ${STENO_FETCH}
-                ${STENO_DICT_NAME} ${STENO_DICTS_DIR}
-            COMMAND ${CMAKE_COMMAND} -E touch ${STENO_DICT_SRC}.stamp
-            COMMENT "Checking ${STENO_DICT_NAME} dictionary for updates"
-        )
-        add_custom_target(steno_dict_fetch DEPENDS ${STENO_DICT_SRC}.stamp)
+    # Fetch at build time if hash changed
+    if(DEFINED STENO_DICT_NAME)
+      add_custom_command(
+          OUTPUT ${STENO_DICT_SRC}.stamp
+          COMMAND ${Python3_EXECUTABLE} ${STENO_FETCH}
+              ${STENO_DICT_NAME} ${STENO_DICTS_DIR}
+          COMMAND ${CMAKE_COMMAND} -E touch ${STENO_DICT_SRC}.stamp
+          COMMENT "Checking ${STENO_DICT_NAME} dictionary for updates"
+      )
+      add_custom_target(steno_dict_fetch DEPENDS ${STENO_DICT_SRC}.stamp)
+    endif()
+
+    if(CONFIG_STENO_SPLIT_DICT)
+      # Split mode: compile the appropriate partition
+      if(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+        set(STENO_SPLIT_PART "left")
+        set(STENO_SPLIT_SIZE ${CONFIG_STENO_DICT_LEFT_MAX_SIZE})
+      else()
+        set(STENO_SPLIT_PART "right")
+        set(STENO_SPLIT_SIZE ${CONFIG_STENO_DICT_RIGHT_MAX_SIZE})
       endif()
 
+      add_custom_command(
+          OUTPUT ${STENO_DICT_BIN}
+          COMMAND ${Python3_EXECUTABLE}
+              ${CMAKE_CURRENT_SOURCE_DIR}/tools/compile_mphf.py
+              ${STENO_DICT_SRC} ${STENO_DICT_BIN}
+              --split-part ${STENO_SPLIT_PART}
+              --left-size ${CONFIG_STENO_DICT_LEFT_MAX_SIZE}
+              --right-size ${CONFIG_STENO_DICT_RIGHT_MAX_SIZE}
+              --max-size ${STENO_SPLIT_SIZE}
+              --block-size 2048
+          DEPENDS ${STENO_DICT_SRC}
+              ${CMAKE_CURRENT_SOURCE_DIR}/tools/compile_mphf.py
+          COMMENT "Compiling steno dictionary (${STENO_SPLIT_PART} partition)"
+      )
+    elseif(CONFIG_STENO_DICT_MPHF)
       add_custom_command(
           OUTPUT ${STENO_DICT_BIN}
           COMMAND ${Python3_EXECUTABLE}

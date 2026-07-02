@@ -18,6 +18,7 @@
 
 #if IS_ENABLED(CONFIG_STENO_SPLIT_DICT)
 #include "split_dict.h"
+#include "dict_mphf.h"
 #elif IS_ENABLED(CONFIG_STENO_DICT_MPHF)
 #include "dict_mphf.h"
 #else
@@ -26,12 +27,10 @@
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
-#if !IS_ENABLED(CONFIG_STENO_SPLIT_DICT)
 extern const uint8_t _steno_dict_start[];
 extern const uint8_t _steno_dict_end[];
-#endif
 
-#if IS_ENABLED(CONFIG_STENO_DICT_MPHF) && !IS_ENABLED(CONFIG_STENO_SPLIT_DICT)
+#if IS_ENABLED(CONFIG_STENO_DICT_MPHF) || IS_ENABLED(CONFIG_STENO_SPLIT_DICT)
 static struct dict_mphf mphf_dict;
 #endif
 
@@ -57,6 +56,12 @@ static void multi_timeout_handler(struct k_work *work);
 static const char *do_lookup(const uint32_t *strokes, uint8_t count)
 {
 #if IS_ENABLED(CONFIG_STENO_SPLIT_DICT)
+    /* Try local partition first (zero latency) */
+    const char *local = dict_mphf_lookup(&mphf_dict, strokes, count);
+    if (local) {
+        return local;
+    }
+    /* Miss → query remote partition over BLE */
     static char split_buf[128];
     int ret = split_dict_lookup(strokes, count, split_buf, sizeof(split_buf));
     return (ret > 0) ? split_buf : NULL;
@@ -70,6 +75,11 @@ static const char *do_lookup(const uint32_t *strokes, uint8_t count)
 static bool do_has_prefix(const uint32_t *strokes, uint8_t count)
 {
 #if IS_ENABLED(CONFIG_STENO_SPLIT_DICT)
+    /* Check local prefix table first */
+    if (count == 1 && dict_mphf_has_prefix(&mphf_dict, strokes[0])) {
+        return true;
+    }
+    /* Fall through to remote */
     return split_dict_has_prefix(strokes, count);
 #elif IS_ENABLED(CONFIG_STENO_DICT_MPHF)
     return (count == 1) ? dict_mphf_has_prefix(&mphf_dict, strokes[0]) : false;
@@ -225,6 +235,21 @@ static int behavior_steno_init(const struct device *dev)
     k_work_init_delayable(&state.multi_timeout, multi_timeout_handler);
 
 #if IS_ENABLED(CONFIG_STENO_SPLIT_DICT)
+    /* Init local partition dict */
+    {
+        size_t dict_size = _steno_dict_end - _steno_dict_start;
+        if (dict_size > 4) {
+            int ret = dict_mphf_init(&mphf_dict, _steno_dict_start, dict_size);
+            if (ret == 0) {
+                LOG_INF("Local partition loaded (%u bytes)", (unsigned)dict_size);
+            } else {
+                LOG_ERR("Local partition init failed: %d", ret);
+            }
+        } else {
+            LOG_WRN("No local partition embedded");
+        }
+    }
+    /* Init BLE client for remote partition */
     split_dict_init();
     dict_ready = true;
 #else

@@ -31,7 +31,7 @@ struct dict_mphf_header {
     uint8_t  value_bits;
     uint8_t  disp_bits;
     uint16_t prefix_count;
-    uint32_t reserved0;
+    uint32_t block_size;    /* zlib block size (0 = default 4096) */
     uint32_t reserved1;
 } __attribute__((packed));
 
@@ -52,6 +52,7 @@ struct dict_mphf {
     const uint32_t *block_dir;         /* block offset directory */
     const uint8_t  *blocks_start;      /* start of compressed blocks */
     uint32_t        str_data_len;      /* total string data section length */
+    uint32_t        blk_size;          /* actual block size from header */
 };
 
 int dict_mphf_init(struct dict_mphf *dict, const void *data, size_t len);
