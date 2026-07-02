@@ -170,7 +170,7 @@ def build_chd(keys_and_bytes, entry_count):
         displacements[bucket] = d value
         slot_to_entry_idx[slot] = index into keys_and_bytes, or -1 if empty
     """
-    bucket_count = max(entry_count // 2, min(entry_count, 16))
+    bucket_count = max(entry_count, 16)
 
     # Assign keys to buckets
     buckets = defaultdict(list)
@@ -271,7 +271,7 @@ def compile_mphf(entries, max_size=None, block_size=4096):
         unique_count = len(unique_translations)
 
         # Estimate size
-        bucket_count = max(entry_count // 2, min(entry_count, 16))
+        bucket_count = max(entry_count, 16)
         est_value_bits = max(1, math.ceil(math.log2(max(unique_count, 2))))
         est_disp_bits = 16  # conservative
         est_disp_bytes = (bucket_count * est_disp_bits + 7) // 8
@@ -318,7 +318,7 @@ def compile_mphf(entries, max_size=None, block_size=4096):
               file=sys.stderr)
 
     entry_count = len(keys_and_bytes)
-    bucket_count = max(entry_count // 2, min(entry_count, 16))
+    bucket_count = max(entry_count, 16)
 
     print(f"  Building CHD MPHF: {entry_count} entries, {bucket_count} buckets...",
           file=sys.stderr)
@@ -509,16 +509,17 @@ def partition_entries(entries, left_budget, right_budget):
     """Partition dict entries by importance into left (central) and right (peripheral).
 
     Left gets highest-importance entries first (most common single-stroke words).
-    Right gets remaining entries. Split point is proportional to flash budgets.
-    compile_mphf's internal trimming handles any overshoot.
+    Right gets remaining entries. Uses empirical ~4 bytes/entry from MPHF benchmarks
+    to estimate how many entries each budget can hold.
 
     Returns (left_entries, right_entries).
     """
     sorted_entries = sorted(entries, key=lambda e: score_entry(e[0], e[1]))
 
-    total_budget = left_budget + right_budget
-    left_ratio = left_budget / total_budget
-    left_max = int(len(sorted_entries) * left_ratio)
+    # ~4 bytes/entry average from 583KB / 147K entries benchmark
+    # Use 4.5 for safety margin (smaller partitions have higher per-entry overhead)
+    est_bytes_per_entry = 4.5
+    left_max = int(left_budget / est_bytes_per_entry)
     left_max = max(1, min(left_max, len(sorted_entries) - 1))
 
     left_entries = sorted_entries[:left_max]
