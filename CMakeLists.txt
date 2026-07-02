@@ -137,8 +137,9 @@ if(STENO_NEED_DICT_EMBED)
     endif()
     add_dependencies(app steno_dict_gen)
 
-    set_property(SOURCE src/dict_embed.S APPEND PROPERTY
-        COMPILE_DEFINITIONS STENO_DICT_BIN_PATH="${STENO_DICT_BIN}")
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/steno_dict_path.h
+         "#define STENO_DICT_BIN_PATH \"${STENO_DICT_BIN}\"\n")
+    target_include_directories(app PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
   endif()
 endif()
 
