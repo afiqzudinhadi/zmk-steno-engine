@@ -166,13 +166,11 @@ def build_chd(keys_and_bytes, entry_count):
     keys_and_bytes: list of (index, key_bytes) for each entry
     entry_count: total number of entries
 
-    Returns: (displacements, slot_to_entry_idx, slot_count, max_displacement)
+    Returns: (displacements, slot_to_entry_idx, max_displacement)
         displacements[bucket] = d value
         slot_to_entry_idx[slot] = index into keys_and_bytes, or -1 if empty
-        slot_count: actual number of slots (>= entry_count)
     """
-    bucket_count = max(entry_count // 5, 16)
-    slot_count = math.ceil(entry_count * 1.23)
+    bucket_count = max(entry_count // 4, 16)
 
     # Assign keys to buckets
     buckets = defaultdict(list)
@@ -185,7 +183,7 @@ def build_chd(keys_and_bytes, entry_count):
 
     displacements = [0] * bucket_count
     occupied = set()
-    slot_to_entry = [-1] * slot_count
+    slot_to_entry = [-1] * entry_count
     max_disp = 0
 
     for bucket_id, members in sorted_buckets:
@@ -195,13 +193,13 @@ def build_chd(keys_and_bytes, entry_count):
         member_key_bytes = [(m, keys_and_bytes[m][1]) for m in members]
 
         placed = False
-        for d in range(65536):
+        for d in range(1 << 20):
             slots = []
             collision = False
             seen = set()
 
             for _, kb in member_key_bytes:
-                slot = hash_key(kb, d + 1) % slot_count
+                slot = hash_key(kb, d + 1) % entry_count
                 if slot in occupied or slot in seen:
                     collision = True
                     break
@@ -223,11 +221,11 @@ def build_chd(keys_and_bytes, entry_count):
             break
 
         if not placed:
-            print(f"FATAL: bucket {bucket_id} with {len(members)} keys failed after 65536 tries",
+            print(f"FATAL: bucket {bucket_id} with {len(members)} keys failed after 1048576 tries",
                   file=sys.stderr)
-            return None, None, None, None
+            return None, None, None
 
-    return displacements, slot_to_entry, slot_count, max_disp
+    return displacements, slot_to_entry, max_disp
 
 
 # ─── Compilation ───
@@ -294,7 +292,7 @@ def compile_mphf(entries, max_size=None, block_size=4096):
 
     # Build CHD
     chd_input = [(i, keys_and_bytes[i][0]) for i in range(entry_count)]
-    displacements, slot_to_entry, slot_count, max_disp = build_chd(chd_input, entry_count)
+    displacements, slot_to_entry, max_disp = build_chd(chd_input, entry_count)
 
     if displacements is None:
         return None
@@ -306,7 +304,7 @@ def compile_mphf(entries, max_size=None, block_size=4096):
     value_bits = max(1, math.ceil(math.log2(max(unique_count, 2))))
     prefix_count = len(prefix_list)
 
-    print(f"  Slots: {slot_count}, buckets: {bucket_count}", file=sys.stderr)
+    print(f"  Buckets: {bucket_count}", file=sys.stderr)
     print(f"  Max displacement: {max_disp}, disp_bits: {disp_bits}", file=sys.stderr)
     print(f"  Unique translations: {unique_count}, value_bits: {value_bits}", file=sys.stderr)
     print(f"  Prefix entries: {prefix_count}", file=sys.stderr)
@@ -320,10 +318,10 @@ def compile_mphf(entries, max_size=None, block_size=4096):
     disp_writer.pad_to_alignment(4)
     disp_section = disp_writer.to_bytes()
 
-    # Values section: slot → value_id (slot_count slots, not entry_count)
+    # Values section: slot → value_id
     val_writer = BitWriter()
-    fingerprints = bytearray(slot_count)
-    for slot in range(slot_count):
+    fingerprints = bytearray(entry_count)
+    for slot in range(entry_count):
         entry_idx = slot_to_entry[slot]
         if entry_idx >= 0:
             kb, trans, stroke_str, strokes = keys_and_bytes[entry_idx]
@@ -358,21 +356,21 @@ def compile_mphf(entries, max_size=None, block_size=4096):
 
     # Header (32 bytes):
     #   magic: u32, version: u16, flags: u16,
-    #   slot_count: u32, bucket_count: u32, unique_count: u32,
+    #   entry_count: u32, bucket_count: u32, unique_count: u32,
     #   value_bits: u8, disp_bits: u8, prefix_count: u16,
-    #   block_size: u32, entry_count: u32
+    #   block_size: u32, reserved1: u32
     header = struct.pack('<IHHIIIBBHii',
         0x4F4E5453,     # magic "STNO"
-        3,              # version (bumped: slot_count in header)
+        2,              # version
         0x0001,         # flags: bit 0 = block-compressed strings
-        slot_count,     # slot_count (was entry_count)
+        entry_count,    # entry_count
         bucket_count,   # bucket_count
         unique_count,   # unique_count
         value_bits,     # value_bits
         disp_bits,      # disp_bits
         prefix_count,   # prefix_count
         block_size,     # block_size
-        entry_count,    # entry_count (was reserved1)
+        0,              # reserved1
     )
     assert len(header) == 32, f"Header is {len(header)} bytes, expected 32"
 
@@ -392,7 +390,7 @@ def compile_mphf(entries, max_size=None, block_size=4096):
         disp_reader.bit_pos = bucket * disp_bits
         d = disp_reader.read_bits(disp_bits)
 
-        slot = hash_key(kb, d + 1) % slot_count
+        slot = hash_key(kb, d + 1) % entry_count
 
         # Check fingerprint
         expected_fp = fnv1a_32(kb) & 0xFF
@@ -443,7 +441,6 @@ def compile_mphf(entries, max_size=None, block_size=4096):
 
     return binary, {
         'entry_count': entry_count,
-        'slot_count': slot_count,
         'bucket_count': bucket_count,
         'unique_count': unique_count,
         'value_bits': value_bits,
@@ -464,12 +461,12 @@ def compile_mphf(entries, max_size=None, block_size=4096):
 
 def print_stats(stats):
     """Print size breakdown statistics."""
-    print(f"Entries: {stats['entry_count']}, slots: {stats.get('slot_count', stats['entry_count'])}")
+    print(f"Entries: {stats['entry_count']}")
     print(f"Block size: {stats.get('block_size', 4096)} bytes")
     print(f"MPHF displacements: {stats['disp_section_bytes']/1024:.1f} KB "
           f"({stats['bucket_count']} buckets, {stats['disp_bits']} bits each)")
     print(f"Value array: {stats['val_section_bytes']/1024:.1f} KB "
-          f"({stats.get('slot_count', stats['entry_count'])} slots, {stats['value_bits']} bits each)")
+          f"({stats['entry_count']} entries, {stats['value_bits']} bits each)")
     print(f"Fingerprints: {stats['fp_section_bytes']/1024:.1f} KB")
     print(f"String offsets: {stats['str_offsets_bytes']/1024:.1f} KB "
           f"({stats['unique_count']} unique x 3 bytes)")
