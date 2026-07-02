@@ -509,21 +509,17 @@ def partition_entries(entries, left_budget, right_budget):
     """Partition dict entries by importance into left (central) and right (peripheral).
 
     Left gets highest-importance entries first (most common single-stroke words).
-    Right gets remaining entries. Both are trimmed to their flash budgets via
-    compile_mphf's internal trimming.
+    Right gets remaining entries. Split point is proportional to flash budgets.
+    compile_mphf's internal trimming handles any overshoot.
 
     Returns (left_entries, right_entries).
     """
     sorted_entries = sorted(entries, key=lambda e: score_entry(e[0], e[1]))
 
-    # Rough estimate: ~15 bytes per entry average (conservative)
-    # compile_mphf will trim further if needed
-    est_bytes_per_entry = 15
-    left_max = left_budget // est_bytes_per_entry
-    right_max = right_budget // est_bytes_per_entry
-
-    # Cap to actual count
-    left_max = min(left_max, len(sorted_entries))
+    total_budget = left_budget + right_budget
+    left_ratio = left_budget / total_budget
+    left_max = int(len(sorted_entries) * left_ratio)
+    left_max = max(1, min(left_max, len(sorted_entries) - 1))
 
     left_entries = sorted_entries[:left_max]
     right_entries = sorted_entries[left_max:]
@@ -545,10 +541,10 @@ def main():
                        help='Verify compiled dict (default: true)')
     parser.add_argument('--split-part', choices=['left', 'right'],
                        help='Build one partition of a split dict (left=central, right=peripheral)')
-    parser.add_argument('--left-size', type=int, default=430080,
-                       help='Left partition flash budget in bytes (default: 430080 = 420KB)')
-    parser.add_argument('--right-size', type=int, default=545792,
-                       help='Right partition flash budget in bytes (default: 545792 = 533KB)')
+    parser.add_argument('--left-size', type=int, default=153600,
+                       help='Left partition flash budget in bytes (default: 153600 = 150KB)')
+    parser.add_argument('--right-size', type=int, default=512000,
+                       help='Right partition flash budget in bytes (default: 512000 = 500KB)')
     parser.add_argument('--block-size', type=int, default=4096,
                        help='Zlib compression block size (default: 4096, try 2048/1024 for tighter packing)')
     args = parser.parse_args()

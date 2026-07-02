@@ -94,16 +94,19 @@ if STENO_SPLIT_DICT
 
 config STENO_DICT_LEFT_MAX_SIZE
 	int "Left half dict budget (bytes)"
-	default 430080
+	default 153600
 	help
-	  Flash budget for left (central) partition. Default 420KB.
+	  Flash budget for left (central) partition. Default 150KB.
+	  Central has more code overhead (behavior, formatter, output,
+	  undo, BLE client) so gets a smaller dict partition.
 	  Highest-importance entries fill this first.
 
 config STENO_DICT_RIGHT_MAX_SIZE
 	int "Right half dict budget (bytes)"
-	default 545792
+	default 512000
 	help
-	  Flash budget for right (peripheral) partition. Default 533KB.
+	  Flash budget for right (peripheral) partition. Default 500KB.
+	  Peripheral has less code overhead so gets the bulk of the dict.
 	  Remaining entries after left partition is filled.
 
 config STENO_SPLIT_CACHE_SIZE
