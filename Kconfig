@@ -78,7 +78,7 @@ config STENO_DICT_MAX_SIZE
 	default 473088
 	help
 	  Max compiled dict size. 473088 = 462KB.
-	  The MPHF compiler auto-trims to fit.
+	  Build fails if dict exceeds this — no trimming.
 
 menuconfig STENO_SPLIT_DICT
 	bool "Split dictionary across both halves"

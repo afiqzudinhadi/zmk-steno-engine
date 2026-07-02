@@ -158,15 +158,15 @@ int dict_mphf_init(struct dict_mphf *dict, const void *data, size_t len)
     dict->disp_section_len = align4((disp_bits_total + 7) / 8);
     offset += dict->disp_section_len;
 
-    /* Values */
+    /* Values (slot_count slots, not entry_count) */
     dict->values = base + offset;
-    uint32_t val_bits_total = (uint32_t)hdr->entry_count * hdr->value_bits;
+    uint32_t val_bits_total = (uint32_t)hdr->slot_count * hdr->value_bits;
     dict->val_section_len = align4((val_bits_total + 7) / 8);
     offset += dict->val_section_len;
 
-    /* Fingerprints */
+    /* Fingerprints (one per slot) */
     dict->fingerprints = base + offset;
-    dict->fp_section_len = align4(hdr->entry_count);
+    dict->fp_section_len = align4(hdr->slot_count);
     offset += dict->fp_section_len;
 
     /* String offsets (u24 LE, 3 bytes each) */
@@ -189,7 +189,7 @@ int dict_mphf_init(struct dict_mphf *dict, const void *data, size_t len)
     }
 
     /* Block size from header (0 = legacy default 4096) */
-    dict->blk_size = hdr->block_size ? hdr->block_size : DICT_MPHF_BLOCK_SIZE;
+    dict->blk_size = hdr->block_size ? hdr->block_size : 4096;
 
     /* Prefix table at end */
     uint32_t prefix_bytes = (uint32_t)hdr->prefix_count * 4;
@@ -236,7 +236,7 @@ static const char *resolve_string(const struct dict_mphf *dict, uint32_t val_id)
     const uint8_t *compressed = dict->blocks_start + blk_start;
     uint32_t compressed_len = blk_end - blk_start;
 
-    static uint8_t decomp_buf[DICT_MPHF_BLOCK_SIZE];
+    static uint8_t decomp_buf[4096];
     static uint32_t cached_block = UINT32_MAX;
     static size_t cached_len;
 
@@ -285,7 +285,7 @@ const char *dict_mphf_lookup(const struct dict_mphf *dict,
     uint32_t d = read_bits(dict->displacements,
                            bucket * (uint32_t)hdr->disp_bits,
                            hdr->disp_bits);
-    uint32_t slot = hash_key(key_buf, key_len, d + 1) % hdr->entry_count;
+    uint32_t slot = hash_key(key_buf, key_len, d + 1) % hdr->slot_count;
 
     uint8_t expected_fp = (uint8_t)(fnv1a_32(key_buf, key_len) & 0xFF);
     if (dict->fingerprints[slot] != expected_fp) {

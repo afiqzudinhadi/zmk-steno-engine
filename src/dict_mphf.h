@@ -1,8 +1,9 @@
 /**
  * MPHF (Minimal Perfect Hash Function) dictionary lookup engine.
  *
- * Binary format v2: CHD MPHF + bit-packed displacements/values +
- * fingerprinted verification + block-compressed string table.
+ * Binary format v3: CHD MPHF with spare slots + bit-packed
+ * displacements/values + fingerprinted verification +
+ * block-compressed string table.
  *
  * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
  */
@@ -15,24 +16,22 @@
 #include <stddef.h>
 
 #define DICT_MPHF_MAGIC   0x4F4E5453  /* "STNO" */
-#define DICT_MPHF_VERSION 2
+#define DICT_MPHF_VERSION 3
 
 #define DICT_MPHF_FLAG_COMPRESSED 0x0001
-
-#define DICT_MPHF_BLOCK_SIZE 4096
 
 struct dict_mphf_header {
     uint32_t magic;
     uint16_t version;
     uint16_t flags;
-    uint32_t entry_count;
+    uint32_t slot_count;
     uint32_t bucket_count;
     uint32_t unique_count;
     uint8_t  value_bits;
     uint8_t  disp_bits;
     uint16_t prefix_count;
-    uint32_t block_size;    /* zlib block size (0 = default 4096) */
-    uint32_t reserved1;
+    uint32_t block_size;
+    uint32_t entry_count;
 } __attribute__((packed));
 
 _Static_assert(sizeof(struct dict_mphf_header) == 32, "header must be 32 bytes");
@@ -65,6 +64,11 @@ bool dict_mphf_has_prefix(const struct dict_mphf *dict, uint32_t stroke);
 static inline uint32_t dict_mphf_count(const struct dict_mphf *dict)
 {
     return dict->header->entry_count;
+}
+
+static inline uint32_t dict_mphf_slot_count(const struct dict_mphf *dict)
+{
+    return dict->header->slot_count;
 }
 
 #endif /* DICT_MPHF_H */

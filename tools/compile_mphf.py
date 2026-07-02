@@ -166,11 +166,13 @@ def build_chd(keys_and_bytes, entry_count):
     keys_and_bytes: list of (index, key_bytes) for each entry
     entry_count: total number of entries
 
-    Returns: (displacements, slot_to_entry_idx, max_displacement)
+    Returns: (displacements, slot_to_entry_idx, slot_count, max_displacement)
         displacements[bucket] = d value
         slot_to_entry_idx[slot] = index into keys_and_bytes, or -1 if empty
+        slot_count: actual number of slots (>= entry_count)
     """
-    bucket_count = max(entry_count, 16)
+    bucket_count = max(entry_count // 5, 16)
+    slot_count = math.ceil(entry_count * 1.23)
 
     # Assign keys to buckets
     buckets = defaultdict(list)
@@ -183,7 +185,7 @@ def build_chd(keys_and_bytes, entry_count):
 
     displacements = [0] * bucket_count
     occupied = set()
-    slot_to_entry = [-1] * entry_count
+    slot_to_entry = [-1] * slot_count
     max_disp = 0
 
     for bucket_id, members in sorted_buckets:
@@ -199,7 +201,7 @@ def build_chd(keys_and_bytes, entry_count):
             seen = set()
 
             for _, kb in member_key_bytes:
-                slot = hash_key(kb, d + 1) % entry_count
+                slot = hash_key(kb, d + 1) % slot_count
                 if slot in occupied or slot in seen:
                     collision = True
                     break
@@ -223,9 +225,9 @@ def build_chd(keys_and_bytes, entry_count):
         if not placed:
             print(f"FATAL: bucket {bucket_id} with {len(members)} keys failed after 65536 tries",
                   file=sys.stderr)
-            return None, None, None
+            return None, None, None, None
 
-    return displacements, slot_to_entry, max_disp
+    return displacements, slot_to_entry, slot_count, max_disp
 
 
 # ─── Compilation ───
@@ -258,83 +260,37 @@ def compile_mphf(entries, max_size=None, block_size=4096):
 
     keys_and_bytes = list(seen_keys.values())
 
-    # Iteratively trim if needed
-    while True:
-        entry_count = len(keys_and_bytes)
-        if entry_count == 0:
-            return None
+    entry_count = len(keys_and_bytes)
+    if entry_count == 0:
+        return None
 
-        # Build deduped string table
-        translations = [kb[1] for kb in keys_and_bytes]
-        unique_translations = sorted(set(translations))
-        trans_to_id = {t: i for i, t in enumerate(unique_translations)}
-        unique_count = len(unique_translations)
-
-        # Estimate size
-        bucket_count = max(entry_count, 16)
-        est_value_bits = max(1, math.ceil(math.log2(max(unique_count, 2))))
-        est_disp_bits = 16  # conservative
-        est_disp_bytes = (bucket_count * est_disp_bits + 7) // 8
-        est_disp_bytes = ((est_disp_bytes + 3) // 4) * 4
-        est_value_bytes = (entry_count * est_value_bits + 7) // 8
-        est_value_bytes = ((est_value_bytes + 3) // 4) * 4
-        est_fp_bytes = ((entry_count + 3) // 4) * 4
-
-        # String table (block-compressed)
-        string_data_raw = b''
-        string_offsets = []
-        for t in unique_translations:
-            string_offsets.append(len(string_data_raw))
-            string_data_raw += t.encode('utf-8') + b'\x00'
-
-        compressed_blocks = []
-        for i in range(0, len(string_data_raw), block_size):
-            block = string_data_raw[i:i + block_size]
-            compressed_blocks.append(zlib.compress(block, 9))
-
-        est_str_offsets = unique_count * 3  # u24 packed LE
-        est_block_dir = 2 + len(compressed_blocks) * 4  # u16 count + u32 offsets
-        est_str_data = sum(len(b) for b in compressed_blocks) + est_block_dir
-
-        # Prefix table
-        prefix_strokes = set()
-        for kb, trans, stroke_str, strokes in keys_and_bytes:
-            if len(strokes) > 1:
-                prefix_strokes.add(strokes[0])
-        prefix_list = sorted(prefix_strokes)
-        est_prefix = len(prefix_list) * 4
-
-        total_est = 32 + est_disp_bytes + est_value_bytes + est_fp_bytes + est_str_offsets + est_str_data + est_prefix
-
-        if total_est <= max_size:
-            break
-
-        # Trim: use ratio of overshoot to estimate how many entries to cut
-        overshoot_ratio = total_est / max_size
-        target_entries = int(entry_count / overshoot_ratio * 0.98)  # 2% safety margin
-        trim_count = max(1, entry_count - target_entries)
-        keys_and_bytes = keys_and_bytes[:entry_count - trim_count]
-        print(f"  Trimming to {len(keys_and_bytes)} entries (est {total_est} > {max_size})",
-              file=sys.stderr)
+    # Build deduped string table
+    translations = [kb[1] for kb in keys_and_bytes]
+    unique_translations = sorted(set(translations))
+    trans_to_id = {t: i for i, t in enumerate(unique_translations)}
+    unique_count = len(unique_translations)
 
     entry_count = len(keys_and_bytes)
     bucket_count = max(entry_count, 16)
 
-    print(f"  Building CHD MPHF: {entry_count} entries, {bucket_count} buckets...",
+    print(f"  Building CHD MPHF: {entry_count} entries...",
           file=sys.stderr)
 
     # Build CHD
     chd_input = [(i, keys_and_bytes[i][0]) for i in range(entry_count)]
-    displacements, slot_to_entry, max_disp = build_chd(chd_input, entry_count)
+    displacements, slot_to_entry, slot_count, max_disp = build_chd(chd_input, entry_count)
 
     if displacements is None:
         return None
+
+    bucket_count = len(displacements)
 
     # Compute actual bit widths
     disp_bits = max(1, math.ceil(math.log2(max(max_disp + 1, 2))))
     value_bits = max(1, math.ceil(math.log2(max(unique_count, 2))))
     prefix_count = len(prefix_list)
 
+    print(f"  Slots: {slot_count}, buckets: {bucket_count}", file=sys.stderr)
     print(f"  Max displacement: {max_disp}, disp_bits: {disp_bits}", file=sys.stderr)
     print(f"  Unique translations: {unique_count}, value_bits: {value_bits}", file=sys.stderr)
     print(f"  Prefix entries: {prefix_count}", file=sys.stderr)
@@ -348,10 +304,10 @@ def compile_mphf(entries, max_size=None, block_size=4096):
     disp_writer.pad_to_alignment(4)
     disp_section = disp_writer.to_bytes()
 
-    # Values section: slot → value_id
+    # Values section: slot → value_id (slot_count slots, not entry_count)
     val_writer = BitWriter()
-    fingerprints = bytearray(entry_count)
-    for slot in range(entry_count):
+    fingerprints = bytearray(slot_count)
+    for slot in range(slot_count):
         entry_idx = slot_to_entry[slot]
         if entry_idx >= 0:
             kb, trans, stroke_str, strokes = keys_and_bytes[entry_idx]
@@ -386,21 +342,21 @@ def compile_mphf(entries, max_size=None, block_size=4096):
 
     # Header (32 bytes):
     #   magic: u32, version: u16, flags: u16,
-    #   entry_count: u32, bucket_count: u32, unique_count: u32,
+    #   slot_count: u32, bucket_count: u32, unique_count: u32,
     #   value_bits: u8, disp_bits: u8, prefix_count: u16,
-    #   block_size: u32, reserved1: u32
+    #   block_size: u32, entry_count: u32
     header = struct.pack('<IHHIIIBBHii',
         0x4F4E5453,     # magic "STNO"
-        2,              # version
+        3,              # version (bumped: slot_count in header)
         0x0001,         # flags: bit 0 = block-compressed strings
-        entry_count,    # entry_count
+        slot_count,     # slot_count (was entry_count)
         bucket_count,   # bucket_count
         unique_count,   # unique_count
         value_bits,     # value_bits
         disp_bits,      # disp_bits
         prefix_count,   # prefix_count
-        block_size,     # block_size (was reserved0)
-        0,              # reserved1
+        block_size,     # block_size
+        entry_count,    # entry_count (was reserved1)
     )
     assert len(header) == 32, f"Header is {len(header)} bytes, expected 32"
 
@@ -420,7 +376,7 @@ def compile_mphf(entries, max_size=None, block_size=4096):
         disp_reader.bit_pos = bucket * disp_bits
         d = disp_reader.read_bits(disp_bits)
 
-        slot = hash_key(kb, d + 1) % entry_count
+        slot = hash_key(kb, d + 1) % slot_count
 
         # Check fingerprint
         expected_fp = fnv1a_32(kb) & 0xFF
@@ -463,12 +419,15 @@ def compile_mphf(entries, max_size=None, block_size=4096):
 
     print(f"  Verification passed: all {entry_count} entries OK", file=sys.stderr)
 
-    # Check final size
-    if len(binary) > max_size:
-        print(f"  WARNING: output {len(binary)} bytes exceeds max {max_size}", file=sys.stderr)
+    # Check final size — hard error, never trim
+    if max_size and len(binary) > max_size:
+        print(f"FATAL: output {len(binary)} bytes exceeds budget {max_size}. "
+              f"Increase budget or split differently.", file=sys.stderr)
+        return None
 
     return binary, {
         'entry_count': entry_count,
+        'slot_count': slot_count,
         'bucket_count': bucket_count,
         'unique_count': unique_count,
         'value_bits': value_bits,
@@ -489,12 +448,12 @@ def compile_mphf(entries, max_size=None, block_size=4096):
 
 def print_stats(stats):
     """Print size breakdown statistics."""
-    print(f"Entries: {stats['entry_count']}")
+    print(f"Entries: {stats['entry_count']}, slots: {stats.get('slot_count', stats['entry_count'])}")
     print(f"Block size: {stats.get('block_size', 4096)} bytes")
     print(f"MPHF displacements: {stats['disp_section_bytes']/1024:.1f} KB "
           f"({stats['bucket_count']} buckets, {stats['disp_bits']} bits each)")
     print(f"Value array: {stats['val_section_bytes']/1024:.1f} KB "
-          f"({stats['entry_count']} entries, {stats['value_bits']} bits each)")
+          f"({stats.get('slot_count', stats['entry_count'])} slots, {stats['value_bits']} bits each)")
     print(f"Fingerprints: {stats['fp_section_bytes']/1024:.1f} KB")
     print(f"String offsets: {stats['str_offsets_bytes']/1024:.1f} KB "
           f"({stats['unique_count']} unique x 3 bytes)")
@@ -534,8 +493,6 @@ def main():
     parser.add_argument('output', help='Output binary file')
     parser.add_argument('--max-size', type=int, default=462*1024,
                        help='Maximum output size in bytes (default: 473088 = 462KB)')
-    parser.add_argument('--max-entries', type=int, default=None,
-                       help='Maximum number of entries')
     parser.add_argument('--stats', action='store_true',
                        help='Print size breakdown statistics')
     parser.add_argument('--verify', action='store_true', default=True,
@@ -557,11 +514,6 @@ def main():
     print(f"Loaded {len(raw_dict)} entries from {args.input}", file=sys.stderr)
 
     entries = list(raw_dict.items())
-
-    if args.max_entries is not None:
-        entries_scored = sorted(entries, key=lambda e: score_entry(e[0], e[1]))
-        entries = entries_scored[:args.max_entries]
-        print(f"Trimmed to {len(entries)} entries (--max-entries)", file=sys.stderr)
 
     # Split-partition mode
     if args.split_part:
