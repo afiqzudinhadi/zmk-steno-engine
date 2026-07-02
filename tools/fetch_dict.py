@@ -18,7 +18,7 @@ DICTS = {
         "filename": "plover-main.json",
     },
     "lapwing": {
-        "url": "https://raw.githubusercontent.com/aerickt/steno-dictionaries/main/lapwing-base.json",
+        "url": "https://raw.githubusercontent.com/aerickt/plover-lapwing-aio/main/plover_lapwing/dictionaries/lapwing-base.json",
         "filename": "lapwing.json",
     },
 }
