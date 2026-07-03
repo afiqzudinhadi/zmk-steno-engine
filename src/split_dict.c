@@ -11,10 +11,12 @@
 #include <errno.h>
 #include <string.h>
 #include <zephyr/kernel.h>
+#include <zephyr/init.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/uuid.h>
+#include <zephyr/bluetooth/att.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/logging/log.h>
 
@@ -190,20 +192,148 @@ static uint8_t notify_cb(struct bt_conn *conn,
 BT_GATT_SERVICE_DEFINE(steno_dict_svc,
     BT_GATT_PRIMARY_SERVICE(STENO_UUID_SERVICE),
 
-    /* Dict request characteristic: write + notify */
+    /* Dict request characteristic: write (with or without response) + notify */
     BT_GATT_CHARACTERISTIC(STENO_UUID_DICT_REQ,
-                           BT_GATT_CHRC_WRITE | BT_GATT_CHRC_NOTIFY,
+                           BT_GATT_CHRC_WRITE |
+                           BT_GATT_CHRC_WRITE_WITHOUT_RESP |
+                           BT_GATT_CHRC_NOTIFY,
                            BT_GATT_PERM_WRITE,
                            NULL, dict_req_write_cb, NULL),
     BT_GATT_CCC(NULL, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 );
 #endif /* !CONFIG_STENO_DEBUG_NO_GATT */
 
-/* --- Central-side API --- */
+/* --- Central-side client: connection tracking + GATT discovery --- */
 
-/* Connection handle for GATT writes (set externally or via connection cb) */
 static struct bt_conn *split_conn;
+static uint16_t req_value_handle;
 static struct bt_gatt_subscribe_params subscribe_params;
+
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+
+static struct bt_gatt_discover_params discover_params;
+
+/* Static UUID storage: discovery is asynchronous, the filter UUID must
+ * outlive the initiating call. */
+static struct bt_uuid_128 uuid_steno_svc = BT_UUID_INIT_128(BT_UUID_128_ENCODE(
+    0x7374656e, 0x6f00, 0x4000, 0x8000, 0x000000000001));
+static struct bt_uuid_128 uuid_steno_req = BT_UUID_INIT_128(BT_UUID_128_ENCODE(
+    0x7374656e, 0x6f00, 0x4000, 0x8000, 0x000000000002));
+
+static uint8_t discover_func(struct bt_conn *conn,
+                             const struct bt_gatt_attr *attr,
+                             struct bt_gatt_discover_params *params)
+{
+    int err;
+
+    if (!attr) {
+        LOG_WRN("Steno dict discovery: attribute not found (type %u)",
+                params->type);
+        return BT_GATT_ITER_STOP;
+    }
+
+    if (params->type == BT_GATT_DISCOVER_PRIMARY) {
+        /* Service found → discover its request characteristic */
+        discover_params.uuid = &uuid_steno_req.uuid;
+        discover_params.start_handle = attr->handle + 1;
+        discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
+
+        err = bt_gatt_discover(conn, &discover_params);
+        if (err) {
+            LOG_ERR("Char discovery failed: %d", err);
+        }
+        return BT_GATT_ITER_STOP;
+    }
+
+    if (params->type == BT_GATT_DISCOVER_CHARACTERISTIC) {
+        req_value_handle = bt_gatt_attr_value_handle(attr);
+
+        /* CCC descriptor follows the value attribute */
+        discover_params.uuid = BT_UUID_GATT_CCC;
+        discover_params.start_handle = req_value_handle + 1;
+        discover_params.type = BT_GATT_DISCOVER_DESCRIPTOR;
+
+        err = bt_gatt_discover(conn, &discover_params);
+        if (err) {
+            LOG_ERR("CCC discovery failed: %d", err);
+        }
+        return BT_GATT_ITER_STOP;
+    }
+
+    if (params->type == BT_GATT_DISCOVER_DESCRIPTOR) {
+        subscribe_params.notify = notify_cb;
+        subscribe_params.value = BT_GATT_CCC_NOTIFY;
+        subscribe_params.value_handle = req_value_handle;
+        subscribe_params.ccc_handle = attr->handle;
+
+        err = bt_gatt_subscribe(conn, &subscribe_params);
+        if (err && err != -EALREADY) {
+            LOG_ERR("Subscribe failed: %d", err);
+        } else {
+            LOG_INF("Steno dict channel ready (handle 0x%04x)",
+                    req_value_handle);
+        }
+        return BT_GATT_ITER_STOP;
+    }
+
+    return BT_GATT_ITER_STOP;
+}
+
+static void start_discovery(struct bt_conn *conn)
+{
+    memset(&discover_params, 0, sizeof(discover_params));
+    discover_params.uuid = &uuid_steno_svc.uuid;
+    discover_params.func = discover_func;
+    discover_params.start_handle = BT_ATT_FIRST_ATTRIBUTE_HANDLE;
+    discover_params.end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE;
+    discover_params.type = BT_GATT_DISCOVER_PRIMARY;
+
+    int err = bt_gatt_discover(conn, &discover_params);
+    if (err) {
+        LOG_ERR("Steno dict service discovery failed: %d", err);
+    }
+}
+
+static void split_connected(struct bt_conn *conn, uint8_t err)
+{
+    struct bt_conn_info info;
+
+    if (err || bt_conn_get_info(conn, &info) != 0) {
+        return;
+    }
+    /* The connection this half initiated = the link to the peripheral
+     * half. Host links have the peripheral role. */
+    if (info.role != BT_CONN_ROLE_CENTRAL) {
+        return;
+    }
+
+    if (split_conn) {
+        bt_conn_unref(split_conn);
+    }
+    split_conn = bt_conn_ref(conn);
+    req_value_handle = 0;
+
+    LOG_INF("Split peripheral connected, discovering steno dict service");
+    start_discovery(conn);
+}
+
+static void split_disconnected(struct bt_conn *conn, uint8_t reason)
+{
+    if (conn != split_conn) {
+        return;
+    }
+    bt_conn_unref(split_conn);
+    split_conn = NULL;
+    req_value_handle = 0;
+    LOG_INF("Split peripheral disconnected (reason %u)", reason);
+}
+
+BT_CONN_CB_DEFINE(steno_split_conn_cb) = {
+    .connected = split_connected,
+    .disconnected = split_disconnected,
+};
+
+#endif /* CONFIG_ZMK_SPLIT_ROLE_CENTRAL */
 
 /* Send one request packet, block for its RESPONSE, copy text into out.
  * Returns text length on success, -ENOENT on NOT_FOUND, negative errno
@@ -212,15 +342,16 @@ static int split_request(const void *pkt, uint16_t pkt_len, uint8_t seq, char *o
 {
     int err;
 
-    if (!split_conn) {
-        LOG_ERR("No split connection");
+    if (!split_conn || req_value_handle == 0) {
+        LOG_WRN("Steno dict channel not ready");
         return -ENOTCONN;
     }
 
     pending_seq = seq;
     k_sem_reset(&response_sem);
 
-    err = bt_gatt_write_without_response(split_conn, 0, pkt, pkt_len, false);
+    err = bt_gatt_write_without_response(split_conn, req_value_handle,
+                                         pkt, pkt_len, false);
     if (err) {
         LOG_ERR("GATT write failed: %d", err);
         return err;
@@ -342,9 +473,6 @@ int split_dict_init(void)
 {
     split_cache_init(&dict_cache);
     seq_counter = 0;
-    split_conn = NULL;
-    subscribe_params.notify = notify_cb;
-    subscribe_params.value = BT_GATT_CCC_NOTIFY;
 
     LOG_INF("Split dict initialized (protocol v4)");
     return 0;
@@ -356,3 +484,10 @@ int split_dict_gatt_register(void)
     LOG_INF("Split dict GATT service registered");
     return 0;
 }
+
+static int split_dict_sys_init(void)
+{
+    return split_dict_init();
+}
+
+SYS_INIT(split_dict_sys_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
