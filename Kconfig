@@ -34,7 +34,6 @@ endchoice
 config STENO_DICT_V4
 	bool "v4 union split-section dictionary format"
 	default y
-	select ZLIB
 	help
 	  Compile the dictionary into the v4 union split-section format
 	  (docs/FORMAT_V4.md): two half blobs, left (central) holds the
@@ -45,10 +44,8 @@ config STENO_DICT_V4
 config STENO_DICT_MPHF
 	bool
 	default y if !STENO_DICT_V4
-	select ZLIB
 	help
 	  Legacy MPHF (minimal perfect hash) dictionary format.
-	  Selects ZLIB for block-compressed string table decompression.
 
 config STENO_CUSTOM_KEYMAP
 	bool "Custom steno keymap"

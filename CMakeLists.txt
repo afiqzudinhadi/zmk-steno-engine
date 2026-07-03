@@ -72,6 +72,7 @@ if(CONFIG_STENO_DICT_V4)
         src/formatter.c
         src/undo.c
         src/dict_v4.c
+        src/inflate.c
         src/split_dict.c
         src/split_cache.c
         src/dict_embed.S
@@ -81,6 +82,7 @@ if(CONFIG_STENO_DICT_V4)
     # Peripheral: right half blob + GATT server
     target_sources(app PRIVATE
         src/dict_v4.c
+        src/inflate.c
         src/split_dict.c
         src/split_cache.c
         src/dict_embed.S

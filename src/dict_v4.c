@@ -25,79 +25,18 @@
 
 /* ─── Raw-deflate block inflate (wbits = -15) ─── */
 
-#ifndef __ZEPHYR__
+#include "inflate.h"
 
-/* Use zlib on host for native tests */
-#ifdef HAS_ZLIB
-#include <zlib.h>
 static int block_inflate_raw(const uint8_t *src, size_t src_len,
                              uint8_t *dst, size_t dst_cap, size_t *dst_len)
 {
-    z_stream strm;
-    memset(&strm, 0, sizeof(strm));
-    if (inflateInit2(&strm, -15) != Z_OK) {
+    int ret = steno_inflate(src, src_len, dst, dst_cap);
+    if (ret < 0) {
         return -1;
     }
-    strm.next_in = (Bytef *)(uintptr_t)src;
-    strm.avail_in = (uInt)src_len;
-    strm.next_out = dst;
-    strm.avail_out = (uInt)dst_cap;
-    int ret = inflate(&strm, Z_FINISH);
-    inflateEnd(&strm);
-    if (ret == Z_STREAM_END) {
-        *dst_len = dst_cap - strm.avail_out;
-        return 0;
-    }
-    return -1;
+    *dst_len = (size_t)ret;
+    return 0;
 }
-#else
-static int block_inflate_raw(const uint8_t *src, size_t src_len,
-                             uint8_t *dst, size_t dst_cap, size_t *dst_len)
-{
-    /* No zlib on host — string sections unavailable */
-    (void)src; (void)src_len; (void)dst; (void)dst_cap; (void)dst_len;
-    return -1;
-}
-#endif /* HAS_ZLIB */
-
-#else /* __ZEPHYR__ */
-
-#include <zephyr/sys/util.h>
-
-#if __has_include(<zephyr/lib/zlib/zlib.h>)
-#include <zephyr/lib/zlib/zlib.h>
-#elif __has_include(<zlib.h>)
-#include <zlib.h>
-#endif
-
-static int block_inflate_raw(const uint8_t *src, size_t src_len,
-                             uint8_t *dst, size_t dst_cap, size_t *dst_len)
-{
-#if defined(CONFIG_ZLIB)
-    z_stream strm;
-    memset(&strm, 0, sizeof(strm));
-    if (inflateInit2(&strm, -15) != Z_OK) {
-        return -1;
-    }
-    strm.next_in = (Bytef *)(uintptr_t)src;
-    strm.avail_in = (uInt)src_len;
-    strm.next_out = dst;
-    strm.avail_out = (uInt)dst_cap;
-    int ret = inflate(&strm, Z_FINISH);
-    inflateEnd(&strm);
-    if (ret == Z_STREAM_END) {
-        *dst_len = dst_cap - strm.avail_out;
-        return 0;
-    }
-    return -1;
-#else
-    /* No zlib available — the v4 string path cannot run on this half */
-    (void)src; (void)src_len; (void)dst; (void)dst_cap; (void)dst_len;
-    return -1;
-#endif
-}
-
-#endif /* __ZEPHYR__ */
 
 /* ─── Byte helpers (blob fields may be unaligned) ─── */
 
