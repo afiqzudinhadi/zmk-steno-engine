@@ -191,7 +191,8 @@ static int dynamic_tables(struct bitstream *s,
     static const uint8_t order[19] = {
         16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
     };
-    uint8_t lengths[MAX_CODES];
+    /* Static to keep embedded stack use minimal (single-context). */
+    static uint8_t lengths[MAX_CODES];
     uint32_t hlit, hdist, hclen;
 
     if (bits(s, 5, &hlit) < 0 || bits(s, 5, &hdist) < 0 ||
@@ -214,7 +215,7 @@ static int dynamic_tables(struct bitstream *s,
         lengths[order[i]] = (uint8_t)v;
     }
 
-    struct huffman clcode;
+    static struct huffman clcode;
     if (construct(&clcode, lengths, 19) < 0) {
         return -1;
     }
@@ -297,7 +298,11 @@ int steno_inflate(const uint8_t *src, size_t src_len,
             dst_len += len;
             s.pos += len;
         } else if (type == 1 || type == 2) {
-            struct huffman lencode, distcode;
+            /* Static: ~1.2 KB combined — too large for the caller's
+             * stack on embedded threads. Decoder is single-context
+             * (one worker on the peripheral; host tests are
+             * single-threaded). */
+            static struct huffman lencode, distcode;
             int ret = (type == 1) ? fixed_tables(&lencode, &distcode)
                                   : dynamic_tables(&s, &lencode, &distcode);
             if (ret < 0) {

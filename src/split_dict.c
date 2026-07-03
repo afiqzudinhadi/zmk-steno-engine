@@ -38,8 +38,7 @@ static uint8_t rx_buf[sizeof(struct steno_response_pkt) + SPLIT_DICT_MAX_TEXT];
 static uint16_t rx_len;
 static uint8_t seq_counter;
 
-/* Notify buffer (peripheral side) */
-static uint8_t notify_buf[sizeof(struct steno_response_pkt) + SPLIT_DICT_MAX_TEXT];
+
 
 /* Cache instance */
 static struct split_cache dict_cache;
@@ -66,7 +65,36 @@ static void make_resolve_key(uint32_t slot, uint8_t dict, uint32_t key[2])
     key[1] = slot;
 }
 
-/* --- GATT Write Callbacks (peripheral side handlers) --- */
+/* --- Peripheral side: request worker ---
+ *
+ * Requests arrive in the BT RX thread, whose stack is far too small to
+ * inflate 16 KB string blocks (and blocking it starves the link). The
+ * write callback only copies the packet and hands it to a dedicated
+ * work queue; the worker resolves the request and notifies the reply.
+ */
+
+#if !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && \
+    !defined(CONFIG_STENO_DEBUG_NO_GATT)
+#define STENO_DICT_PERIPHERAL 1
+#endif
+
+#ifdef STENO_DICT_PERIPHERAL
+
+#define STENO_REQ_MAX 16
+
+struct steno_req_slot {
+    struct bt_conn *conn;             /* reference held until reply sent */
+    const struct bt_gatt_attr *attr;  /* static service attribute */
+    uint8_t buf[STENO_REQ_MAX];
+    uint16_t len;
+};
+
+static uint8_t notify_buf[sizeof(struct steno_response_pkt) + SPLIT_DICT_MAX_TEXT];
+static struct steno_req_slot req_slot;
+static atomic_t req_busy;
+
+K_THREAD_STACK_DEFINE(steno_workq_stack, 4096);
+static struct k_work_q steno_workq;
 
 static void send_response(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                           uint8_t seq, int ret, const char *text)
@@ -134,27 +162,63 @@ static ssize_t handle_resolve(struct bt_conn *conn,
     return len;
 }
 
+static void req_work_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+
+    struct bt_conn *conn = req_slot.conn;
+    const struct bt_gatt_attr *attr = req_slot.attr;
+    const uint8_t *bytes = req_slot.buf;
+    uint16_t len = req_slot.len;
+
+    switch (bytes[0]) {
+    case STENO_MSG_GET_STRING:
+        handle_get_string(conn, attr, bytes, len);
+        break;
+    case STENO_MSG_RESOLVE:
+        handle_resolve(conn, attr, bytes, len);
+        break;
+    default:
+        LOG_WRN("Unknown msg type: 0x%02x", bytes[0]);
+        send_response(conn, attr, len >= 2 ? bytes[1] : 0, -EIO, NULL);
+        break;
+    }
+
+    bt_conn_unref(conn);
+    req_slot.conn = NULL;
+    atomic_clear(&req_busy);
+}
+
+static K_WORK_DEFINE(req_work, req_work_handler);
+
 static ssize_t dict_req_write_cb(struct bt_conn *conn,
                                  const struct bt_gatt_attr *attr,
                                  const void *buf, uint16_t len,
                                  uint16_t offset, uint8_t flags)
 {
-    const uint8_t *bytes = buf;
-
-    if (len < 1) {
+    if (len < 1 || len > STENO_REQ_MAX) {
         return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
     }
 
-    switch (bytes[0]) {
-    case STENO_MSG_GET_STRING:
-        return handle_get_string(conn, attr, buf, len);
-    case STENO_MSG_RESOLVE:
-        return handle_resolve(conn, attr, buf, len);
-    default:
-        LOG_WRN("Unknown msg type: 0x%02x", bytes[0]);
-        return BT_GATT_ERR(BT_ATT_ERR_NOT_SUPPORTED);
+    /* One request in flight: the central blocks per request, so a
+     * second arrival means it already timed out — drop this one and
+     * let it retry. */
+    if (atomic_set(&req_busy, 1) != 0) {
+        LOG_WRN("Request dropped: worker busy");
+        return len;
     }
+
+    req_slot.conn = bt_conn_ref(conn);
+    req_slot.attr = attr;
+    memcpy(req_slot.buf, buf, len);
+    req_slot.len = len;
+
+    k_work_submit_to_queue(&steno_workq, &req_work);
+
+    return len;
 }
+
+#endif /* STENO_DICT_PERIPHERAL */
 
 /* --- Notification callback (central side) --- */
 
@@ -188,7 +252,7 @@ static uint8_t notify_cb(struct bt_conn *conn,
 
 /* --- GATT Service Definition --- */
 
-#ifndef CONFIG_STENO_DEBUG_NO_GATT
+#ifdef STENO_DICT_PERIPHERAL
 BT_GATT_SERVICE_DEFINE(steno_dict_svc,
     BT_GATT_PRIMARY_SERVICE(STENO_UUID_SERVICE),
 
@@ -201,7 +265,7 @@ BT_GATT_SERVICE_DEFINE(steno_dict_svc,
                            NULL, dict_req_write_cb, NULL),
     BT_GATT_CCC(NULL, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 );
-#endif /* !CONFIG_STENO_DEBUG_NO_GATT */
+#endif /* STENO_DICT_PERIPHERAL */
 
 /* --- Central-side client: connection tracking + GATT discovery --- */
 
@@ -499,6 +563,13 @@ int split_dict_init(void)
 {
     split_cache_init(&dict_cache);
     seq_counter = 0;
+
+#ifdef STENO_DICT_PERIPHERAL
+    k_work_queue_start(&steno_workq, steno_workq_stack,
+                       K_THREAD_STACK_SIZEOF(steno_workq_stack),
+                       K_PRIO_PREEMPT(10), NULL);
+    k_thread_name_set(&steno_workq.thread, "steno_dict");
+#endif
 
     LOG_INF("Split dict initialized (protocol v4)");
     return 0;
