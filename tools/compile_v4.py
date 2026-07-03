@@ -98,14 +98,27 @@ STENO_KEYS = {
 IMPLICIT_HYPHEN = set('AOEU*')
 
 
+# Plover number strokes: a digit means the number bar (#) plus the key
+# sharing its physical position. Each digit maps to exactly one key.
+DIGIT_KEYS = {
+    '1': 'S-', '2': 'T-', '3': 'P-', '4': 'H-',
+    '5': 'A-', '0': 'O-',
+    '6': '-F', '7': '-P', '8': '-L', '9': '-T',
+}
+
+
 def parse_stroke(s):
     result = 0
     if '#' in s:
         result |= STENO_KEYS['#']
         s = s.replace('#', '')
+    if any(c in DIGIT_KEYS for c in s):
+        result |= STENO_KEYS['#']
     has_hyphen = '-' in s
     s_clean = s.replace('-', '')
-    if not has_hyphen and not any(c in IMPLICIT_HYPHEN for c in s_clean):
+    if (not has_hyphen and
+            not any(c in IMPLICIT_HYPHEN for c in s_clean) and
+            not any(c in DIGIT_KEYS for c in s_clean)):
         for c in s_clean:
             key = c + '-'
             if key in STENO_KEYS:
@@ -116,7 +129,9 @@ def parse_stroke(s):
         for i, c in enumerate(s):
             if c == '-':
                 continue
-            if c in 'AO':
+            if c in DIGIT_KEYS:
+                result |= STENO_KEYS[DIGIT_KEYS[c]]
+            elif c in 'AO':
                 result |= STENO_KEYS[c + '-']
             elif c in 'EU':
                 result |= STENO_KEYS['-' + c]
@@ -129,7 +144,11 @@ def parse_stroke(s):
     else:
         past_vowels = False
         for c in s_clean:
-            if c in 'AO':
+            if c in DIGIT_KEYS:
+                result |= STENO_KEYS[DIGIT_KEYS[c]]
+                if c in '5069' or c in '78':
+                    past_vowels = True
+            elif c in 'AO':
                 result |= STENO_KEYS[c + '-']
                 past_vowels = True
             elif c in 'EU':
