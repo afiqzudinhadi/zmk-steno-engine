@@ -665,6 +665,9 @@ uint8_t dict_v4_max_strokes(const struct dict_v4 *d)
 
 #ifdef __ZEPHYR__
 
+#include <zephyr/logging/log.h>
+LOG_MODULE_REGISTER(dict_v4, CONFIG_STENO_SPLIT_LOG_LEVEL);
+
 #ifdef CONFIG_STENO_SPLIT_DICT
 /* BLE transport for the sections living on the other half (split_dict.c) */
 extern int split_dict_get_string(uint32_t string_id, char *out, size_t out_size);
@@ -729,13 +732,18 @@ int steno_dict_lookup(const uint32_t *strokes, uint8_t count,
     ret = dict_v4_lookup(&dict_singleton, strokes, count, active_dict_id,
                          &slot, &string_id);
 
+    LOG_INF("lookup n=%u s0=0x%06x dict=%u -> %d slot=%u sid=%u",
+            count, strokes[0], active_dict_id, ret, slot, string_id);
+
     if (ret == DICT_V4_FOUND_LOCAL) {
         if (dict_singleton.strdir_entries && dict_singleton.strings) {
             return dict_v4_string_by_id_ctx(&dict_singleton, string_id,
                                             out, out_size);
         }
 #ifdef CONFIG_STENO_SPLIT_DICT
-        return split_dict_get_string(string_id, out, out_size);
+        ret = split_dict_get_string(string_id, out, out_size);
+        LOG_INF("get_string(%u) -> %d", string_id, ret);
+        return ret;
 #else
         return -ENOTSUP;
 #endif
@@ -743,7 +751,9 @@ int steno_dict_lookup(const uint32_t *strokes, uint8_t count,
 
     if (ret == DICT_V4_FOUND_REMOTE) {
 #ifdef CONFIG_STENO_SPLIT_DICT
-        return split_dict_resolve(slot, active_dict_id, out, out_size);
+        ret = split_dict_resolve(slot, active_dict_id, out, out_size);
+        LOG_INF("resolve(%u) -> %d", slot, ret);
+        return ret;
 #else
         return -ENOTSUP;
 #endif
