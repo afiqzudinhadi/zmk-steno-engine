@@ -95,6 +95,11 @@ if(CONFIG_STENO_DICT_V4)
   steno_fetch_dict(plover ${STENO_PLOVER_JSON})
   steno_fetch_dict(lapwing ${STENO_LAPWING_JSON})
 
+  if(CONFIG_STENO_DEBUG_NO_EMBED)
+    # Bisect aid: no blob, dict_embed.S falls back to a 4-byte stub.
+    set(STENO_DICT_BIN "")
+  else()
+
   # Single run produces both blobs. The compiler FAILS the build if
   # either half exceeds its budget — entries are never trimmed.
   add_custom_command(
@@ -115,6 +120,8 @@ if(CONFIG_STENO_DICT_V4)
 
   add_custom_target(steno_dict_gen DEPENDS ${STENO_DICT_BIN})
   add_dependencies(app steno_dict_gen)
+
+  endif() # CONFIG_STENO_DEBUG_NO_EMBED
 
 # ── Legacy MPHF format (STENO_DICT_V4=n fallback) ────
 else()
@@ -228,10 +235,15 @@ endif() # CONFIG_STENO_DICT_V4
 if(STENO_DICT_BIN)
   file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/steno_dict_path.h
        "#define STENO_DICT_BIN_PATH \"${STENO_DICT_BIN}\"\n")
-  target_include_directories(app PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
   set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/src/dict_embed.S
       TARGET_DIRECTORY app
       PROPERTIES OBJECT_DEPENDS ${STENO_DICT_BIN})
+else()
+  # Debug no-embed: header exists but defines no blob path;
+  # dict_embed.S falls back to a 4-byte stub.
+  file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/steno_dict_path.h
+       "/* STENO_DEBUG_NO_EMBED: no dictionary blob */\n")
 endif()
+target_include_directories(app PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 endif() # CONFIG_STENO_ENGINE

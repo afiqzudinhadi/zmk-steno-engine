@@ -54,6 +54,19 @@ config STENO_CUSTOM_KEYMAP
 	bool "Custom steno keymap"
 	default n
 
+config STENO_DEBUG_NO_GATT
+	bool "Debug: omit the split-dict GATT service"
+	default n
+	help
+	  Bisect aid: compile split_dict.c without BT_GATT_SERVICE_DEFINE.
+
+config STENO_DEBUG_NO_EMBED
+	bool "Debug: skip dictionary blob embed"
+	default n
+	help
+	  Bisect aid: embed a 4-byte placeholder instead of the compiled
+	  dictionary blob. Lookups fail cleanly at runtime.
+
 choice STENO_UNICODE_MODE
 	prompt "Unicode output mode"
 	default STENO_UNICODE_MODE_NONE

@@ -186,6 +186,7 @@ static uint8_t notify_cb(struct bt_conn *conn,
 
 /* --- GATT Service Definition --- */
 
+#ifndef CONFIG_STENO_DEBUG_NO_GATT
 BT_GATT_SERVICE_DEFINE(steno_dict_svc,
     BT_GATT_PRIMARY_SERVICE(STENO_UUID_SERVICE),
 
@@ -196,6 +197,7 @@ BT_GATT_SERVICE_DEFINE(steno_dict_svc,
                            NULL, dict_req_write_cb, NULL),
     BT_GATT_CCC(NULL, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 );
+#endif /* !CONFIG_STENO_DEBUG_NO_GATT */
 
 /* --- Central-side API --- */
 
