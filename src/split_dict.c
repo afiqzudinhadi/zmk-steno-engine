@@ -279,8 +279,22 @@ static uint8_t discover_func(struct bt_conn *conn,
     return BT_GATT_ITER_STOP;
 }
 
-static void start_discovery(struct bt_conn *conn)
+/* Discovery is deferred: it must not interleave with ZMK's own split
+ * pairing / service discovery on the same link. Kicked from
+ * security_changed (encrypted link) after a settle delay. */
+static void discovery_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(discovery_work, discovery_work_handler);
+
+#define STENO_DISCOVERY_SETTLE_MS 2000
+
+static void discovery_work_handler(struct k_work *work)
 {
+    ARG_UNUSED(work);
+
+    if (!split_conn || req_value_handle != 0) {
+        return;
+    }
+
     memset(&discover_params, 0, sizeof(discover_params));
     discover_params.uuid = &uuid_steno_svc.uuid;
     discover_params.func = discover_func;
@@ -288,9 +302,10 @@ static void start_discovery(struct bt_conn *conn)
     discover_params.end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE;
     discover_params.type = BT_GATT_DISCOVER_PRIMARY;
 
-    int err = bt_gatt_discover(conn, &discover_params);
+    int err = bt_gatt_discover(split_conn, &discover_params);
     if (err) {
-        LOG_ERR("Steno dict service discovery failed: %d", err);
+        LOG_WRN("Steno dict discovery failed (%d), retrying", err);
+        k_work_schedule(&discovery_work, K_MSEC(STENO_DISCOVERY_SETTLE_MS));
     }
 }
 
@@ -312,9 +327,18 @@ static void split_connected(struct bt_conn *conn, uint8_t err)
     }
     split_conn = bt_conn_ref(conn);
     req_value_handle = 0;
+    /* No GATT traffic yet — wait for encryption (security_changed). */
+}
 
-    LOG_INF("Split peripheral connected, discovering steno dict service");
-    start_discovery(conn);
+static void split_security_changed(struct bt_conn *conn, bt_security_t level,
+                                   enum bt_security_err err)
+{
+    if (conn != split_conn || err != BT_SECURITY_ERR_SUCCESS ||
+        level < BT_SECURITY_L2) {
+        return;
+    }
+    LOG_INF("Split link encrypted, scheduling steno dict discovery");
+    k_work_schedule(&discovery_work, K_MSEC(STENO_DISCOVERY_SETTLE_MS));
 }
 
 static void split_disconnected(struct bt_conn *conn, uint8_t reason)
@@ -322,6 +346,7 @@ static void split_disconnected(struct bt_conn *conn, uint8_t reason)
     if (conn != split_conn) {
         return;
     }
+    k_work_cancel_delayable(&discovery_work);
     bt_conn_unref(split_conn);
     split_conn = NULL;
     req_value_handle = 0;
@@ -330,6 +355,7 @@ static void split_disconnected(struct bt_conn *conn, uint8_t reason)
 
 BT_CONN_CB_DEFINE(steno_split_conn_cb) = {
     .connected = split_connected,
+    .security_changed = split_security_changed,
     .disconnected = split_disconnected,
 };
 
