@@ -732,7 +732,7 @@ int steno_dict_lookup(const uint32_t *strokes, uint8_t count,
     ret = dict_v4_lookup(&dict_singleton, strokes, count, active_dict_id,
                          &slot, &string_id);
 
-    LOG_INF("lookup n=%u s0=0x%06x dict=%u -> %d slot=%u sid=%u",
+    LOG_DBG("lookup n=%u s0=0x%06x dict=%u -> %d slot=%u sid=%u",
             count, strokes[0], active_dict_id, ret, slot, string_id);
 
     if (ret == DICT_V4_FOUND_LOCAL) {
@@ -742,7 +742,7 @@ int steno_dict_lookup(const uint32_t *strokes, uint8_t count,
         }
 #ifdef CONFIG_STENO_SPLIT_DICT
         ret = split_dict_get_string(string_id, out, out_size);
-        LOG_INF("get_string(%u) -> %d", string_id, ret);
+        LOG_DBG("get_string(%u) -> %d", string_id, ret);
         return ret;
 #else
         return -ENOTSUP;
@@ -752,7 +752,7 @@ int steno_dict_lookup(const uint32_t *strokes, uint8_t count,
     if (ret == DICT_V4_FOUND_REMOTE) {
 #ifdef CONFIG_STENO_SPLIT_DICT
         ret = split_dict_resolve(slot, active_dict_id, out, out_size);
-        LOG_INF("resolve(%u) -> %d", slot, ret);
+        LOG_DBG("resolve(%u) -> %d", slot, ret);
         return ret;
 #else
         return -ENOTSUP;
