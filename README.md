@@ -34,7 +34,6 @@ Key measured facts:
   2x nice!nano v2). The dictionary spans both halves — **single-MCU
   keyboards are not supported yet.**
 - ZMK v0.3.x build environment (GitHub Actions user-config works)
-- Python 3 with `numpy` on the build host (dictionary compiler)
 - **Adafruit nRF52 bootloader 0.9.0 or newer on BOTH halves —
   0.11.0 recommended.** See [Bootloader](#bootloader) below; old
   bootloaders silently corrupt large firmware images.
@@ -148,6 +147,12 @@ tools/compile_v4.py  dictionary compiler (both JSONs → two half blobs)
 tools/fetch_dict.py  dictionary downloader (Plover main, Lapwing base)
 tests/test_dict_v4.c host round-trip test (42,000 vectors)
 ```
+
+### Development
+
+The dictionary compiler (`tools/compile_v4.py`) requires Python 3 with
+`numpy`. GitHub Actions runners have this preinstalled; for local builds
+install via `pip install numpy`.
 
 ## License
 
