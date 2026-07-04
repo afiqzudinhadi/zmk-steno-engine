@@ -79,6 +79,26 @@ CONFIG_STENO_SPLIT_TIMEOUT_MS=250
 The build FAILS if either half's blob exceeds its budget — entries are
 never trimmed.
 
+**Budget recommendations** (nRF52840, Adafruit bootloader 0.11.0,
+app ceiling 0xEA000 = 802,816 bytes):
+
+| Config | Left | Right | Notes |
+|--------|------|-------|-------|
+| Both dicts (Plover + Lapwing) | 440320 (430 KB) | 519168 (507 KB) | Tight — little room for extra modules |
+| Plover only | 440320 | 519168 | Comfortable — ~35 KB slack per half |
+| Lapwing only | 440320 | 519168 | Comfortable |
+
+Left budget is smaller because the central half carries more firmware
+code (behavior driver, formatter, output, undo, BLE client, cache) —
+leaving less free flash for dictionary data. The peripheral only runs
+the GATT server + inflate decoder, so it gets the larger share.
+
+Lower these if you add other flash-heavy modules (large RGB animations,
+display assets, etc.) and the linker overflows. The compiler shifts the
+value-index split point to fill the right half first; left gets the
+remainder. If either budget is too small for the compiled dict, the
+build errors out with the exact overshoot.
+
 Keymap: include the behavior and bind the 23 steno keys
 (see `include/dt-bindings/zmk/steno_keys.h` for all key names):
 
