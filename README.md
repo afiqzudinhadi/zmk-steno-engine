@@ -12,21 +12,33 @@ the issue tracker; latency optimization in progress.
 
 ## How it works
 
-One logical dictionary structure, its sections split across the two MCUs:
+Neither dictionary fits on a single MCU (~700 KB raw translations alone,
+~800 KB flash free per half after ZMK + peripherals). The engine solves
+this by:
+
+1. **Merging both dicts into one structure** — a union CHD minimal
+   perfect hash function (MPHF) indexes all 227K stroke keys once.
+   Building two separate indexes would cost 1.8x more flash because
+   33K identical entries and the string table get duplicated.
+2. **Aggressive compression** — translations are sorted, front-coded
+   (common-prefix elimination), then DEFLATE-compressed in 16 KB blocks.
+   Both dicts share the same string table (Lapwing is 93% a subset of
+   Plover), storing all 73K unique translations in 193 KB (28% of raw).
+   MPHF displacements are Huffman-coded (8 bits avg vs 19 fixed).
+3. **Splitting the structure across halves** — sections of the single
+   index are placed on whichever half has budget, not duplicated:
 
 | Half | Holds | Role |
 |------|-------|------|
-| Left (central) | MPHF displacements, membership, fingerprints, conflicts, part of the value index | Every stroke *decision* is local — found / not found / which dictionary |
-| Right (peripheral) | Compressed string table, rest of the value index | Serves translation *text* over a custom BLE GATT protocol |
+| Left (central) | MPHF displacements, membership bitmap, fingerprints, conflict table, value-index slice | Every stroke *decision* is resolved locally — zero BLE latency for hit/miss/which-dict |
+| Right (peripheral) | Compressed string table, value-index remainder, conflict dup | Serves translation *text* on demand over a custom BLE GATT service |
 
-Key measured facts:
-
-- One union CHD MPHF over 227,091 stroke keys — two separate dictionaries
-  would cost 1.8x more flash
-- Lapwing's translations are 93% a subset of Plover's → the shared,
-  front-coded, deflate-compressed string table stores both for 193 KB
-- Stroke decisions never wait on BLE; only text retrieval does
-  (LRU-cached on the left half)
+4. **Custom BLE protocol** — left resolves the stroke to a string ID
+   locally, then requests just the text bytes from the right half
+   (one round trip, LRU-cached). The right half inflates and walks the
+   front-coded block on a dedicated worker thread (16 KB buffer).
+5. **Own DEFLATE decoder** — Zephyr ships no zlib; a minimal RFC 1951
+   decompressor (~300 lines, no allocation) runs on the peripheral.
 
 ## Requirements
 
